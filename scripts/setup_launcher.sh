@@ -13,55 +13,12 @@ LAUNCH_SCRIPT="$APP_DIR/scripts/launch.sh"
 
 echo "Building $APP_BUNDLE …"
 
-# ── 1. Generate icon PNG via Python ──────────────────────────────────────
-"$APP_DIR/.venv/bin/python" - <<'PYEOF'
-import os, sys
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    import numpy as np
-
-    fig, ax = plt.subplots(figsize=(4, 4), facecolor="#1a1a2e")
-    ax.set_facecolor("#1a1a2e")
-    ax.set_xlim(0, 4); ax.set_ylim(0, 4)
-    ax.axis("off")
-
-    # Circular track
-    circle = plt.Circle((2, 2), 1.5, fill=False, color="#e94560", linewidth=8, zorder=1)
-    ax.add_patch(circle)
-
-    # Running figure (simplified SVG-like silhouette as ellipses)
-    body = mpatches.Ellipse((2, 2.2), 0.4, 0.65, angle=10, color="#f0f0f0", zorder=2)
-    head = plt.Circle((2.1, 2.7), 0.22, color="#f0f0f0", zorder=2)
-    ax.add_patch(body); ax.add_patch(head)
-
-    # Legs
-    ax.plot([2, 1.6], [1.9, 1.4], color="#f0f0f0", linewidth=5, solid_capstyle="round", zorder=2)
-    ax.plot([2, 2.3], [1.9, 1.35], color="#f0f0f0", linewidth=5, solid_capstyle="round", zorder=2)
-    # Arms
-    ax.plot([2, 1.55], [2.3, 2.0], color="#f0f0f0", linewidth=4, solid_capstyle="round", zorder=2)
-    ax.plot([2, 2.45], [2.3, 2.0], color="#f0f0f0", linewidth=4, solid_capstyle="round", zorder=2)
-
-    # Label
-    ax.text(2, 0.35, "LRP Coach", ha="center", va="center",
-            fontsize=18, fontweight="bold", color="#e94560", fontfamily="monospace")
-
-    out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/lrp_icon.png"
-    fig.savefig(out, dpi=128, bbox_inches="tight", pad_inches=0.05)
-    plt.close(fig)
-    print(f"Icon written to {out}")
-except Exception as e:
-    print(f"Warning: could not generate icon: {e}", file=sys.stderr)
-PYEOF
-
-# move if saved to /tmp default
-if [ ! -f "$ICON_PNG" ] && [ -f "/tmp/lrp_icon.png" ]; then
-  mv /tmp/lrp_icon.png "$ICON_PNG"
+if [ ! -f "$ICON_PNG" ]; then
+  echo "Error: icon not found at $ICON_PNG"
+  exit 1
 fi
 
-# ── 2. Convert PNG → .icns ────────────────────────────────────────────────
+# ── 1. Convert PNG → .icns ────────────────────────────────────────────────
 make_icns() {
   local src="$1" dest="$2"
   rm -rf "$ICNS_DIR" && mkdir "$ICNS_DIR"
