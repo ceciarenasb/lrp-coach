@@ -212,7 +212,7 @@ def compute_and_generate(
     msg = (f"Plan saved — {len(plan)} weeks to {goal_race}  |  "
            f"VDOT {zones.vdot}  |  SVC {zones.cv_mps * 3.6:.1f} km/h  |  "
            f"Target {_fmt_duration(goal_total)}")
-    return zs, _plan_to_df(plan), msg
+    return zs, _plan_to_df(existing["plan"]), msg
 
 
 # ── Tab 2: Run history ─────────────────────────────────────────────────────
@@ -357,6 +357,7 @@ def checkin(week_num, files, feeling, prev_hr_input):
             break
 
     actual_km, quality_pace_s = 0.0, None
+    _best_quality_dev = float("inf")
     hr_list, drift_list = [], []
 
     if files:
@@ -369,9 +370,11 @@ def checkin(week_num, files, feeling, prev_hr_input):
                 hr_list.append(s["avg_hr"])
             if s.get("hr_drift_pct") is not None:
                 drift_list.append(s["hr_drift_pct"])
-            if quality_target_s and s.get("avg_pace_s"):
-                if quality_target_s - 30 <= s["avg_pace_s"] <= quality_target_s + 90:
+            if quality_target_s and s.get("avg_pace_s") and s.get("distance_km", 0) <= 16:
+                dev = abs(s["avg_pace_s"] - quality_target_s)
+                if dev <= 60 and dev < _best_quality_dev:
                     quality_pace_s = s["avg_pace_s"]
+                    _best_quality_dev = dev
 
     metrics = WeekMetrics(
         actual_km=actual_km, target_km=target_km,
