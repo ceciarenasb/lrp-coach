@@ -18,7 +18,8 @@ def _parse_records(path: str) -> pd.DataFrame:
                     "distance":   g("distance"),
                     "heart_rate": g("heart_rate"),
                     "speed":      g("enhanced_speed") or g("speed"),
-                    "altitude":   g("altitude"),
+                    "altitude":   g("enhanced_altitude") or g("altitude"),
+                    "cadence":    g("cadence"),
                 })
     df = pd.DataFrame(rows)
     return df.dropna(subset=["timestamp"]).reset_index(drop=True)
@@ -50,14 +51,27 @@ def summarize(path: str) -> dict | None:
             if first and first > 0:
                 hr_drift = round((second - first) / first * 100, 1)
 
+        # Cadence (steps per minute): FIT stores single-foot cadence; double it
+        cad = df["cadence"].dropna()
+        avg_cadence = round(float(cad.mean()) * 2) if not cad.empty else None
+
+        # Elevation gain: sum of positive altitude deltas
+        alt = df["altitude"].dropna()
+        elevation_gain_m = None
+        if len(alt) > 1:
+            diffs = alt.diff().dropna()
+            elevation_gain_m = round(float(diffs[diffs > 0].sum()), 0)
+
         return {
-            "date":         str(df["timestamp"].iloc[0].date()),
-            "distance_km":  round(dist_km, 2),
-            "duration_s":   int(duration_s),
-            "avg_pace_s":   round(avg_pace_s) if avg_pace_s else None,
-            "avg_hr":       round(avg_hr) if avg_hr else None,
-            "max_hr":       round(max_hr) if max_hr else None,
-            "hr_drift_pct": hr_drift,
+            "date":               str(df["timestamp"].iloc[0].date()),
+            "distance_km":        round(dist_km, 2),
+            "duration_s":         int(duration_s),
+            "avg_pace_s":         round(avg_pace_s) if avg_pace_s else None,
+            "avg_hr":             round(avg_hr) if avg_hr else None,
+            "max_hr":             round(max_hr) if max_hr else None,
+            "hr_drift_pct":       hr_drift,
+            "avg_cadence_spm":    avg_cadence,
+            "elevation_gain_m":   int(elevation_gain_m) if elevation_gain_m is not None else None,
         }
     except Exception as exc:
         return {"error": str(exc), "date": "unknown", "distance_km": 0}
