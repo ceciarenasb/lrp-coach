@@ -61,9 +61,12 @@ class WeekPlan:
 
 def _peak_km(goal_s: int) -> float:
     h = goal_s / 3600
-    if h <= 3.0: return 90.0
-    if h <= 3.5: return 78.0
-    if h <= 4.0: return 65.0
+    if h <= 3.0:
+        return 90.0
+    if h <= 3.5:
+        return 78.0
+    if h <= 4.0:
+        return 65.0
     return 55.0
 
 
@@ -262,9 +265,11 @@ def generate_plan(
     base = start_km if start_km else peak * 0.55
 
     if injury == "light":
-        peak *= 0.85; base *= 0.85
+        peak *= 0.85
+        base *= 0.85
     elif injury == "moderate":
-        peak *= 0.70; base *= 0.70
+        peak *= 0.70
+        base *= 0.70
 
     if lrp_day is not None and lrp_day not in run_days:
         run_days = sorted(run_days + [lrp_day])
@@ -274,10 +279,14 @@ def generate_plan(
 
     for wk in range(1, weeks + 1):
         pct = wk / weeks
-        if pct < 0.35:   phase = "Base"
-        elif pct < 0.70: phase = "Build"
-        elif pct < 0.85: phase = "Peak"
-        else:            phase = "Taper"
+        if pct < 0.35:
+            phase = "Base"
+        elif pct < 0.70:
+            phase = "Build"
+        elif pct < 0.85:
+            phase = "Peak"
+        else:
+            phase = "Taper"
 
         if wk >= taper_start:
             target_km = max(peak * 0.40, peak * (1 - (wk - taper_start) * 0.22))

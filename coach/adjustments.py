@@ -7,7 +7,7 @@ Rules decide what changes; the LLM explains why and coaches through it.
 from __future__ import annotations
 
 from .plan import (
-    CLUB_RUN, EASY, LONG, MP_RUN, RECOVERY, REST,
+    CLUB_RUN, EASY, MP_RUN, RECOVERY, REST,
     SVC_INTERVAL, TEMPO,
 )
 from .zones import Zones, fmt_pace
@@ -93,8 +93,10 @@ def build_adjustment_context(
     duration = f"weeks {from_week}–{from_week + num_weeks - 1}" if num_weeks > 0 else f"week {from_week} onwards"
     changes_str = "\n".join(f"  • {c}" for c in change_log) if change_log else "  • No structural changes"
     flags = []
-    if no_club_run: flags.append("LRP club runs replaced with easy runs")
-    if easy_only:   flags.append("All quality sessions (tempo/SVC/M-pace) replaced with easy runs")
+    if no_club_run:
+        flags.append("LRP club runs replaced with easy runs")
+    if easy_only:
+        flags.append("All quality sessions (tempo/SVC/M-pace) replaced with easy runs")
     if volume_pct != 1.0:
         pct = int((volume_pct - 1) * 100)
         flags.append(f"Volume adjusted {'+' if pct > 0 else ''}{pct}%")

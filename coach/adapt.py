@@ -8,7 +8,7 @@ Outputs: score (0–100), decision (PROGRESS/MAINTAIN/CONSOLIDATE/RECOVER),
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -77,7 +77,7 @@ def score_week(m: WeekMetrics) -> AdaptationResult:
             flags.append(f"HR slightly elevated on easy runs (+{(hr_trend-1)*100:.0f}%) — monitor closely")
         elif hr_trend < 0.97:
             score += 12
-            flags.append(f"HR dropping at similar effort — aerobic fitness improving ✓")
+            flags.append("HR dropping at similar effort — aerobic fitness improving ✓")
         else:
             flags.append("HR stable on easy runs ✓")
 

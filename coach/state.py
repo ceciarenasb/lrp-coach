@@ -15,6 +15,8 @@ def load() -> dict:
 
 def save(data: dict) -> None:
     _PATH.parent.mkdir(exist_ok=True)
+    if _PATH.exists():
+        _PATH.replace(_PATH.with_suffix(".backup.json"))
     with open(_PATH, "w") as f:
         json.dump(data, f, indent=2, default=str)
 

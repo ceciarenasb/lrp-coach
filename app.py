@@ -12,7 +12,7 @@ from coach import fit as fit_mod
 from coach import llm as llm_mod
 from coach import state as state_mod
 from coach.adapt import WeekMetrics, score_week
-from coach.plan import generate_plan, plan_to_rows
+from coach.plan import generate_plan
 from coach.zones import (
     Zones, build_zones, cv_from_two_efforts, cv_from_vdot,
     fmt_pace, vdot_from_race, zones_summary,
@@ -365,8 +365,10 @@ def checkin(week_num, files, feeling, prev_hr_input):
             if not s or "error" in s:
                 continue
             actual_km += s.get("distance_km", 0)
-            if s.get("avg_hr"):      hr_list.append(s["avg_hr"])
-            if s.get("hr_drift_pct") is not None: drift_list.append(s["hr_drift_pct"])
+            if s.get("avg_hr"):
+                hr_list.append(s["avg_hr"])
+            if s.get("hr_drift_pct") is not None:
+                drift_list.append(s["hr_drift_pct"])
             if quality_target_s and s.get("avg_pace_s"):
                 if quality_target_s - 30 <= s["avg_pace_s"] <= quality_target_s + 90:
                     quality_pace_s = s["avg_pace_s"]
@@ -609,4 +611,4 @@ with gr.Blocks(title="LRP Coach", theme=gr.themes.Soft()) as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue().launch()
