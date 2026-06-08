@@ -4,3 +4,8 @@ __pycache__/
 .DS_Store
 *.fit
 data/state.json
+data/state.backup.json
+.lrp_coach.pid
+.lrp_coach.log
+.pytest_cache/
+
