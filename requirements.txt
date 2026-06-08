@@ -1,0 +1,6 @@
+gradio==4.44.1
+fitdecode
+pandas
+matplotlib
+openpyxl
+mlx-lm
