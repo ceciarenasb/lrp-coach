@@ -4,3 +4,5 @@ pandas
 matplotlib
 openpyxl
 mlx-lm
+garminconnect==0.2.8
+apscheduler==3.10.4

@@ -5,6 +5,8 @@ __pycache__/
 *.fit
 data/state.json
 data/state.backup.json
+data/garmin_creds.json
+data/garmin_token/
 .lrp_coach.pid
 .lrp_coach.log
 .pytest_cache/

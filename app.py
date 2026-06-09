@@ -11,6 +11,8 @@ from coach import adjustments as adj_mod
 from coach import fit as fit_mod
 from coach import llm as llm_mod
 from coach import state as state_mod
+from coach import garmin as garmin_mod
+from coach import scheduler as sched_mod
 from coach.adapt import WeekMetrics, score_week
 from coach.plan import generate_plan
 from coach.zones import (
@@ -615,6 +617,240 @@ def checkin(week_num, files, feeling, prev_hr_input):
     return assessment, note, _plan_to_df(state["plan"])
 
 
+# ── Garmin Connect UI helpers ─────────────────────────────────────────────
+
+def _garmin_status_html(connected: bool, email: str | None) -> str:
+    if connected:
+        return (
+            "<div style='display:inline-flex;align-items:center;gap:8px;"
+            "background:#DCFCE7;border:1px solid #86EFAC;border-radius:8px;"
+            "padding:8px 14px;font-size:13px;font-family:-apple-system,sans-serif'>"
+            "<span style='color:#16A34A;font-size:14px'>●</span>"
+            f"<span style='color:#166534;font-weight:500'>Connected as {email}</span>"
+            "</div>"
+        )
+    return (
+        "<div style='display:inline-flex;align-items:center;gap:8px;"
+        "background:#FEF2F2;border:1px solid #FCA5A5;border-radius:8px;"
+        "padding:8px 14px;font-size:13px;font-family:-apple-system,sans-serif'>"
+        "<span style='color:#DC2626;font-size:14px'>○</span>"
+        "<span style='color:#991B1B;font-weight:500'>Not connected</span>"
+        "</div>"
+    )
+
+
+def load_garmin_ui():
+    status = garmin_mod.connection_status()
+    connected = status != "not_connected"
+    email = status.replace("connected:", "") if connected else None
+    s = state_mod.load()
+    auto_sync = s.get("garmin_auto_sync", False)
+    next_run = sched_mod.next_run_str() if auto_sync else ""
+    return (
+        _garmin_status_html(connected, email),
+        gr.update(visible=not connected),
+        gr.update(visible=False),
+        gr.update(visible=connected),
+        auto_sync,
+        f"<span style='font-size:12px;color:#6B7280'>Next sync: {next_run}</span>" if next_run else "",
+    )
+
+
+def _garmin_ui_outputs(connected, email, auto_sync=False, next_run="", msg=""):
+    return (
+        _garmin_status_html(connected, email),
+        gr.update(visible=not connected),
+        gr.update(visible=False),
+        gr.update(visible=connected),
+        auto_sync,
+        f"<span style='font-size:12px;color:#6B7280'>Next sync: {next_run}</span>" if next_run else "",
+        msg,
+    )
+
+
+def garmin_connect_ui(email, password):
+    if not email or not password:
+        return _garmin_ui_outputs(False, None, msg="Enter email and password.")
+    ok, msg = garmin_mod.connect(email, password)
+    if ok:
+        s = state_mod.load()
+        auto_sync = s.get("garmin_auto_sync", False)
+        return _garmin_ui_outputs(True, email, auto_sync=auto_sync, msg=msg)
+    if msg == "MFA_REQUIRED":
+        return (
+            _garmin_status_html(False, None),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=False),
+            False,
+            "",
+            "Check your email — enter the verification code below.",
+        )
+    return _garmin_ui_outputs(False, None, msg=msg)
+
+
+def garmin_mfa_ui(email, password, mfa_code):
+    ok, msg = garmin_mod.submit_mfa(email, password, mfa_code)
+    if ok:
+        return _garmin_ui_outputs(True, email, msg=msg)
+    return (
+        _garmin_status_html(False, None),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=False),
+        False,
+        "",
+        msg,
+    )
+
+
+def garmin_disconnect_ui():
+    garmin_mod.clear_auth()
+    sched_mod.set_enabled(False)
+    s = state_mod.load()
+    s["garmin_auto_sync"] = False
+    state_mod.save(s)
+    return _garmin_ui_outputs(False, None, msg="Disconnected.")
+
+
+def _merge_into_history(records: list) -> tuple[pd.DataFrame, str]:
+    if not records:
+        return load_history_on_start(), ""
+    existing = state_mod.load().get("history", [])
+    existing_dates = {r["date"] for r in existing}
+    added = [r for r in records if r["date"] not in existing_dates]
+    merged = sorted(existing + added, key=lambda r: r["date"], reverse=True)
+    state_mod.update("history", merged)
+    return pd.DataFrame(merged), f"{len(added)} new run{'s' if len(added) != 1 else ''} added ({len(merged)} total)"
+
+
+def garmin_import_ui():
+    records, sync_msg = garmin_mod.sync_activities(days=30)
+    df, merge_msg = _merge_into_history(records)
+    return df, f"{sync_msg}{' — ' + merge_msg if merge_msg else ''}"
+
+
+def garmin_sync_new_ui():
+    records, sync_msg = garmin_mod.sync_activities(days=3)
+    df, merge_msg = _merge_into_history(records)
+    return df, f"{sync_msg}{' — ' + merge_msg if merge_msg else ''}"
+
+
+def garmin_autosync_toggle(enabled):
+    def _job():
+        garmin_sync_new_ui()
+
+    msg = sched_mod.set_enabled(enabled, _job if enabled else None)
+    s = state_mod.load()
+    s["garmin_auto_sync"] = enabled
+    state_mod.save(s)
+    next_run = sched_mod.next_run_str() if enabled else ""
+    return (
+        f"<span style='font-size:12px;color:#6B7280'>Next sync: {next_run}</span>" if next_run else "",
+        msg,
+    )
+
+
+# ── Weekly check-in from synced history ────────────────────────────────────
+
+def checkin_from_history(week_num, feeling, prev_hr_input):
+    s = state_mod.load()
+    plan = s.get("plan", [])
+    profile = s.get("profile", {})
+    zones_data = s.get("zones", {})
+    history = s.get("history", [])
+
+    if not plan:
+        return None, "No plan found — go to Setup & Plan first.", pd.DataFrame()
+
+    wk_idx = int(week_num) - 1
+    if wk_idx < 0 or wk_idx >= len(plan):
+        return None, f"Week {week_num} not in plan ({len(plan)} weeks total).", pd.DataFrame()
+
+    week = plan[wk_idx]
+    week_dates = {d["date"] for d in week["days"]}
+    week_records = [r for r in history if r.get("date") in week_dates]
+
+    if not week_records:
+        return (
+            None,
+            f"No synced runs found for week {week_num}. Upload FIT files manually or sync from Garmin first.",
+            pd.DataFrame(),
+        )
+
+    target_km = week["target_km"]
+    quality_target_s = None
+    for d in week["days"]:
+        if d.get("session_type") in ("Tempo", "SVC Intervals", "Marathon Pace"):
+            raw = (d.get("targets", {}).get("T_pace")
+                   or d.get("targets", {}).get("SVC_pace")
+                   or d.get("targets", {}).get("M_pace"))
+            if raw and ":" in raw:
+                try:
+                    mm, ss = raw.replace(" /km", "").split(":")
+                    quality_target_s = int(mm) * 60 + int(ss)
+                except Exception:
+                    pass
+            break
+
+    actual_km, quality_pace_s = 0.0, None
+    _best_quality_dev = float("inf")
+    hr_list, drift_list = [], []
+
+    for rec in week_records:
+        actual_km += rec.get("distance_km", 0)
+        if rec.get("avg_hr"):
+            hr_list.append(rec["avg_hr"])
+        if rec.get("hr_drift_pct") is not None:
+            drift_list.append(rec["hr_drift_pct"])
+        if quality_target_s and rec.get("avg_pace_s") and rec.get("distance_km", 0) <= 16:
+            dev = abs(rec["avg_pace_s"] - quality_target_s)
+            if dev <= 60 and dev < _best_quality_dev:
+                quality_pace_s = rec["avg_pace_s"]
+                _best_quality_dev = dev
+
+    metrics = WeekMetrics(
+        actual_km=actual_km, target_km=target_km,
+        quality_avg_pace_s=quality_pace_s, quality_target_pace_s=quality_target_s,
+        easy_avg_hr=sum(hr_list) / len(hr_list) if hr_list else None,
+        prev_easy_hr=float(prev_hr_input) if prev_hr_input else None,
+        avg_hr_drift=sum(drift_list) / len(drift_list) if drift_list else None,
+        avg_feeling=float(feeling),
+    )
+    result = score_week(metrics)
+
+    s["plan"] = _apply_checkin_adaptation(plan, wk_idx, result, zones_data)
+    state_mod.save(s)
+
+    assessment = {
+        "Performance score": f"{result.score} / 100",
+        "Decision": result.decision,
+        "Volume": f"{actual_km:.1f} km  (target {target_km:.1f} km)",
+        "Quality session pace": (f"{fmt_pace(quality_pace_s)}  (target {fmt_pace(quality_target_s)})"
+                                  if quality_pace_s else "not detected"),
+        "Source": f"{len(week_records)} synced run{'s' if len(week_records) != 1 else ''}",
+        "Signals": result.flags,
+        "Next week volume": f"×{result.volume_adj:.2f}",
+        "Quality session": "→ replaced with easy run" if result.drop_quality else "kept as planned",
+        "Extra recovery": "yes" if result.add_recovery else "no",
+    }
+
+    z = Zones(**zones_data)
+    weeks_left = len(plan) - wk_idx
+    next_focus = plan[wk_idx + 1]["focus"] if wk_idx + 1 < len(plan) else "Race week — stay calm"
+
+    note = llm_mod.coaching_note(llm_mod.build_context(
+        name=profile.get("name", "Athlete"),
+        goal_race=profile.get("goal_race", "your marathon"),
+        goal_time=_fmt_duration(profile.get("goal_time_s", 0)),
+        weeks_left=weeks_left, phase=week["phase"],
+        zones_dict=zones_summary(z),
+        metrics=metrics, result=result, next_focus=next_focus,
+    ))
+
+    return assessment, note, _plan_to_df(s["plan"])
+
+
 # ── CSS ────────────────────────────────────────────────────────────────────
 
 CSS = """
@@ -1066,6 +1302,13 @@ _theme = gr.themes.Soft(
     ),
 )
 
+def _daily_sync_job():
+    garmin_sync_new_ui()
+
+_startup = state_mod.load()
+if _startup.get("garmin_auto_sync", False) and garmin_mod.is_authenticated():
+    sched_mod.start(_daily_sync_job)
+
 with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
 
     with gr.Row(elem_id="app-layout", equal_height=True):
@@ -1231,8 +1474,54 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 hist_msg = gr.Textbox(label="Status", interactive=False)
                 gr.HTML('<div class="section-label"><div class="section-label-text">Run log</div></div>')
                 hist_df  = gr.Dataframe(label="", wrap=True)
+
+                gr.HTML('<div class="section-label"><div class="section-label-text">Garmin Connect</div><div class="section-label-sub">Sync activities automatically · password never stored</div></div>')
+                garmin_status = gr.HTML(_garmin_status_html(False, None))
+                with gr.Group(visible=True, elem_id="garmin-connect-form") as garmin_form:
+                    with gr.Row():
+                        garmin_email_in = gr.Textbox(label="Garmin email", placeholder="you@example.com", scale=3)
+                        garmin_pass_in  = gr.Textbox(label="Password", type="password", scale=3)
+                        garmin_conn_btn = gr.Button("Connect", variant="primary", scale=1)
+                with gr.Group(visible=False, elem_id="garmin-mfa-row") as garmin_mfa_group:
+                    with gr.Row():
+                        garmin_mfa_in  = gr.Textbox(label="Verification code", placeholder="6-digit code from your email", scale=3)
+                        garmin_mfa_btn = gr.Button("Submit code", variant="primary", scale=1)
+                with gr.Group(visible=False, elem_id="garmin-synced") as garmin_synced_group:
+                    with gr.Row():
+                        garmin_import_btn     = gr.Button("Import last 30 days", variant="primary")
+                        garmin_sync_btn       = gr.Button("Sync new (last 3 days)", variant="secondary")
+                        garmin_disconnect_btn = gr.Button("Disconnect", variant="stop", size="sm")
+                    with gr.Row():
+                        garmin_autosync_in  = gr.Checkbox(label="Auto-sync daily at 07:00", value=False)
+                        garmin_next_run_out = gr.HTML("")
+                garmin_msg = gr.Textbox(label="Garmin status", interactive=False)
+
+                _garmin_outputs = [garmin_status, garmin_form, garmin_mfa_group,
+                                   garmin_synced_group, garmin_autosync_in, garmin_next_run_out]
+
                 hist_btn.click(process_history, inputs=hist_files, outputs=[hist_df, hist_msg])
                 hist_clear_btn.click(clear_history, outputs=[hist_df, hist_msg])
+                garmin_conn_btn.click(
+                    garmin_connect_ui,
+                    inputs=[garmin_email_in, garmin_pass_in],
+                    outputs=_garmin_outputs + [garmin_msg],
+                )
+                garmin_mfa_btn.click(
+                    garmin_mfa_ui,
+                    inputs=[garmin_email_in, garmin_pass_in, garmin_mfa_in],
+                    outputs=_garmin_outputs + [garmin_msg],
+                )
+                garmin_disconnect_btn.click(
+                    garmin_disconnect_ui,
+                    outputs=_garmin_outputs + [garmin_msg],
+                )
+                garmin_import_btn.click(garmin_import_ui, outputs=[hist_df, garmin_msg])
+                garmin_sync_btn.click(garmin_sync_new_ui, outputs=[hist_df, garmin_msg])
+                garmin_autosync_in.change(
+                    garmin_autosync_toggle,
+                    inputs=[garmin_autosync_in],
+                    outputs=[garmin_next_run_out, garmin_msg],
+                )
 
             # Panel 3 — Adjustments
             with gr.Group(visible=False, elem_id="panel-adj") as panel_adj:
@@ -1299,7 +1588,9 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
 
                 checkin_files = gr.File(file_count="multiple", file_types=[".fit"],
                                         label="FIT files for this week")
-                checkin_btn   = gr.Button("Analyse week & get coaching note", variant="primary")
+                checkin_btn = gr.Button("Analyse week & get coaching note", variant="primary")
+                gr.HTML("<div style='text-align:center;color:#9CA3AF;font-size:12px;margin:2px 0'>— or —</div>")
+                checkin_history_btn = gr.Button("Use synced Garmin history for this week", variant="secondary")
 
                 gr.HTML('<div class="section-label"><div class="section-label-text">Performance assessment</div></div>')
                 checkin_json = gr.JSON(label="")
@@ -1311,6 +1602,11 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 checkin_btn.click(
                     checkin,
                     inputs=[checkin_week, checkin_files, feeling_in, prev_hr_in],
+                    outputs=[checkin_json, coaching_out, checkin_plan_out],
+                )
+                checkin_history_btn.click(
+                    checkin_from_history,
+                    inputs=[checkin_week, feeling_in, prev_hr_in],
                     outputs=[checkin_json, coaching_out, checkin_plan_out],
                 )
 
@@ -1369,6 +1665,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
     demo.load(load_status_on_start,  outputs=status_bar)
     demo.load(load_plan_on_start,    outputs=plan_df)
     demo.load(load_history_on_start, outputs=hist_df)
+    demo.load(load_garmin_ui,        outputs=_garmin_outputs)
 
 
 if __name__ == "__main__":
