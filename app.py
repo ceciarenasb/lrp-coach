@@ -1466,35 +1466,38 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         </div>
                     </div>
                 """)
-                gr.HTML('<div class="section-label"><div class="section-label-text">Add runs</div></div>')
-                hist_files = gr.File(file_count="multiple", file_types=[".fit"], label="FIT files")
-                with gr.Row():
-                    hist_btn       = gr.Button("Add to history", variant="primary")
-                    hist_clear_btn = gr.Button("Clear all history", variant="stop")
-                hist_msg = gr.Textbox(label="Status", interactive=False)
+                with gr.Row(equal_height=False):
+                    # Left column — manual FIT upload
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-label"><div class="section-label-text">Manual upload</div></div>')
+                        hist_files = gr.File(file_count="multiple", file_types=[".fit"], label="FIT files")
+                        with gr.Row():
+                            hist_btn       = gr.Button("Add to history", variant="primary")
+                            hist_clear_btn = gr.Button("Clear all history", variant="stop")
+                        hist_msg = gr.Textbox(label="Status", interactive=False)
+
+                    # Right column — Garmin Connect
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-label"><div class="section-label-text">Garmin Connect</div><div class="section-label-sub">Sync automatically · password never stored</div></div>')
+                        garmin_status = gr.HTML(_garmin_status_html(False, None))
+                        with gr.Group(visible=True, elem_id="garmin-connect-form") as garmin_form:
+                            garmin_email_in = gr.Textbox(label="Garmin email", placeholder="you@example.com")
+                            garmin_pass_in  = gr.Textbox(label="Password", type="password")
+                            garmin_conn_btn = gr.Button("Connect", variant="primary")
+                        with gr.Group(visible=False, elem_id="garmin-mfa-row") as garmin_mfa_group:
+                            garmin_mfa_in  = gr.Textbox(label="Verification code", placeholder="6-digit code from your email")
+                            garmin_mfa_btn = gr.Button("Submit code", variant="primary")
+                        with gr.Group(visible=False, elem_id="garmin-synced") as garmin_synced_group:
+                            with gr.Row():
+                                garmin_import_btn     = gr.Button("Import last 30 days", variant="primary")
+                                garmin_sync_btn       = gr.Button("Sync new (3 days)", variant="secondary")
+                            garmin_autosync_in  = gr.Checkbox(label="Auto-sync daily at 07:00", value=False)
+                            garmin_next_run_out = gr.HTML("")
+                            garmin_disconnect_btn = gr.Button("Disconnect", variant="stop", size="sm")
+                        garmin_msg = gr.Textbox(label="Status", interactive=False)
+
                 gr.HTML('<div class="section-label"><div class="section-label-text">Run log</div></div>')
                 hist_df  = gr.Dataframe(label="", wrap=True)
-
-                gr.HTML('<div class="section-label"><div class="section-label-text">Garmin Connect</div><div class="section-label-sub">Sync activities automatically · password never stored</div></div>')
-                garmin_status = gr.HTML(_garmin_status_html(False, None))
-                with gr.Group(visible=True, elem_id="garmin-connect-form") as garmin_form:
-                    with gr.Row():
-                        garmin_email_in = gr.Textbox(label="Garmin email", placeholder="you@example.com", scale=3)
-                        garmin_pass_in  = gr.Textbox(label="Password", type="password", scale=3)
-                        garmin_conn_btn = gr.Button("Connect", variant="primary", scale=1)
-                with gr.Group(visible=False, elem_id="garmin-mfa-row") as garmin_mfa_group:
-                    with gr.Row():
-                        garmin_mfa_in  = gr.Textbox(label="Verification code", placeholder="6-digit code from your email", scale=3)
-                        garmin_mfa_btn = gr.Button("Submit code", variant="primary", scale=1)
-                with gr.Group(visible=False, elem_id="garmin-synced") as garmin_synced_group:
-                    with gr.Row():
-                        garmin_import_btn     = gr.Button("Import last 30 days", variant="primary")
-                        garmin_sync_btn       = gr.Button("Sync new (last 3 days)", variant="secondary")
-                        garmin_disconnect_btn = gr.Button("Disconnect", variant="stop", size="sm")
-                    with gr.Row():
-                        garmin_autosync_in  = gr.Checkbox(label="Auto-sync daily at 07:00", value=False)
-                        garmin_next_run_out = gr.HTML("")
-                garmin_msg = gr.Textbox(label="Garmin status", interactive=False)
 
                 _garmin_outputs = [garmin_status, garmin_form, garmin_mfa_group,
                                    garmin_synced_group, garmin_autosync_in, garmin_next_run_out]

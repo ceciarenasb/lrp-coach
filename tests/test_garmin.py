@@ -11,10 +11,11 @@ import coach.garmin as garmin
 
 @pytest.fixture(autouse=True)
 def patch_paths(tmp_path, monkeypatch):
-    """Redirect all file I/O to a temp directory so tests stay isolated."""
+    """Redirect all file I/O to a temp directory and reset module state."""
     monkeypatch.setattr(garmin, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(garmin, "GARMIN_TOKEN_DIR", tmp_path / "garmin_token")
     monkeypatch.setattr(garmin, "GARMIN_CREDS_FILE", tmp_path / "garmin_creds.json")
+    monkeypatch.setattr(garmin, "_pending_mfa_client", None)
 
 
 # ── Credential helpers ─────────────────────────────────────────────────────
@@ -95,9 +96,10 @@ def test_connect_success():
     assert ok is True
     assert "runner@lrp.run" in msg
     assert garmin.load_email() == "runner@lrp.run"
+    assert garmin._pending_mfa_client is None
 
 
-def test_connect_mfa_required():
+def test_connect_mfa_required_saves_client_for_submit():
     with patch("garminconnect.Garmin") as MockGarmin:
         client = MagicMock()
         client.login.side_effect = Exception("NEEDS_MFA to continue")
@@ -105,6 +107,7 @@ def test_connect_mfa_required():
         ok, msg = garmin.connect("runner@lrp.run", "secret")
     assert ok is False
     assert msg == "MFA_REQUIRED"
+    assert garmin._pending_mfa_client is client  # held for submit_mfa
 
 
 def test_connect_mfa_case_insensitive_detection():
@@ -117,7 +120,7 @@ def test_connect_mfa_case_insensitive_detection():
     assert msg == "MFA_REQUIRED"
 
 
-def test_connect_generic_error():
+def test_connect_generic_error_clears_pending_client():
     with patch("garminconnect.Garmin") as MockGarmin:
         client = MagicMock()
         client.login.side_effect = Exception("Invalid credentials")
@@ -125,6 +128,7 @@ def test_connect_generic_error():
         ok, msg = garmin.connect("runner@lrp.run", "wrong")
     assert ok is False
     assert "Invalid credentials" in msg
+    assert garmin._pending_mfa_client is None
 
 
 # ── submit_mfa ─────────────────────────────────────────────────────────────
@@ -136,6 +140,16 @@ def test_submit_mfa_success():
     assert ok is True
     assert "runner@lrp.run" in msg
     assert garmin.load_email() == "runner@lrp.run"
+    assert garmin._pending_mfa_client is None
+
+
+def test_submit_mfa_reuses_pending_client():
+    """submit_mfa must use the saved client so garth OAuth state is intact."""
+    pending = MagicMock()
+    garmin._pending_mfa_client = pending
+    ok, msg = garmin.submit_mfa("runner@lrp.run", "secret", "123456")
+    assert ok is True
+    pending.login.assert_called_once_with(mfa_code="123456")
 
 
 def test_submit_mfa_failure():
@@ -154,12 +168,23 @@ def test_get_client_returns_none_when_not_authenticated():
     assert garmin.get_client() is None
 
 
-def test_get_client_returns_none_on_token_refresh_failure():
+def test_get_client_loads_tokens_via_garth():
     garmin.GARMIN_TOKEN_DIR.mkdir()
-    (garmin.GARMIN_TOKEN_DIR / "token.json").write_text("{}")
+    (garmin.GARMIN_TOKEN_DIR / "oauth2_token.json").write_text("{}")
     with patch("garminconnect.Garmin") as MockGarmin:
         client = MagicMock()
-        client.login.side_effect = Exception("token expired")
+        MockGarmin.return_value = client
+        result = garmin.get_client()
+    assert result is client
+    client.garth.load.assert_called_once_with(str(garmin.GARMIN_TOKEN_DIR))
+
+
+def test_get_client_returns_none_on_token_load_failure():
+    garmin.GARMIN_TOKEN_DIR.mkdir()
+    (garmin.GARMIN_TOKEN_DIR / "oauth2_token.json").write_text("{}")
+    with patch("garminconnect.Garmin") as MockGarmin:
+        client = MagicMock()
+        client.garth.load.side_effect = Exception("token expired")
         MockGarmin.return_value = client
         result = garmin.get_client()
     assert result is None

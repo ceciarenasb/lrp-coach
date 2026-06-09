@@ -56,6 +56,9 @@ def clear_auth() -> None:
 
 # ── Client factory ─────────────────────────────────────────────────────────
 
+_pending_mfa_client = None  # held between connect() and submit_mfa()
+
+
 def _make_client(email: str = "", password: str = "") -> "Garmin":
     from garminconnect import Garmin
     return Garmin(email=email or (load_email() or ""), password=password)
@@ -65,29 +68,39 @@ def connect(email: str, password: str) -> tuple[bool, str]:
     """
     Authenticate with Garmin Connect.
     Returns (success, message).
-    On success the garth token is persisted to GARMIN_TOKEN_DIR.
+    On success garth tokens are dumped to GARMIN_TOKEN_DIR.
+    Never pass tokenstore on fresh login — garth raises FileNotFoundError
+    if the directory exists but token files are absent.
     """
+    global _pending_mfa_client
     GARMIN_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
     try:
         client = _make_client(email, password)
-        client.login(tokenstore=str(GARMIN_TOKEN_DIR))
+        client.login()
+        client.garth.dump(str(GARMIN_TOKEN_DIR))
         save_email(email)
+        _pending_mfa_client = None
         return True, f"Connected as {email}"
     except Exception as exc:
         msg = str(exc)
-        # garminconnect raises a plain Exception with the error text
         if "NEEDS_MFA" in msg or "MFA" in msg.upper() or "factor" in msg.lower():
+            _pending_mfa_client = client  # garth keeps OAuth state in this object
             return False, "MFA_REQUIRED"
+        _pending_mfa_client = None
         return False, f"Login failed: {msg}"
 
 
 def submit_mfa(email: str, password: str, mfa_code: str) -> tuple[bool, str]:
     """Complete login when Garmin requested an MFA code."""
+    global _pending_mfa_client
     GARMIN_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    # Reuse the client from connect() so garth's in-progress OAuth state is intact.
+    client = _pending_mfa_client or _make_client(email, password)
     try:
-        client = _make_client(email, password)
-        client.login(tokenstore=str(GARMIN_TOKEN_DIR), mfa_code=mfa_code)
+        client.login(mfa_code=mfa_code)
+        client.garth.dump(str(GARMIN_TOKEN_DIR))
         save_email(email)
+        _pending_mfa_client = None
         return True, f"Connected as {email}"
     except Exception as exc:
         return False, f"MFA failed: {exc}"
@@ -99,7 +112,7 @@ def get_client() -> Optional["Garmin"]:
         return None
     try:
         client = _make_client()
-        client.login(tokenstore=str(GARMIN_TOKEN_DIR))
+        client.garth.load(str(GARMIN_TOKEN_DIR))
         return client
     except Exception as exc:
         logger.warning("Token refresh failed: %s", exc)
