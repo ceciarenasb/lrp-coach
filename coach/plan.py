@@ -233,14 +233,24 @@ def _build_week(
         sessions[d] = _easy(round(share, 1), zones)
         used_km += share
 
-    return [
-        DayPlan(
-            date=week_start + timedelta(days=wd),
-            weekday=wd,
-            session=sessions.get(wd, Session(REST, "Rest or active recovery (walk, stretch)")),
-        )
-        for wd in range(7)
-    ]
+    # Place each weekday on its actual calendar date within this 7-day block.
+    # week_start may be any weekday; (wd - week_start.weekday()) % 7 gives the
+    # correct offset so Monday always lands on a real Monday, Saturday on a real
+    # Saturday, etc. — regardless of what day the plan started on.
+    def _cal_date(wd: int) -> date:
+        return week_start + timedelta(days=(wd - week_start.weekday()) % 7)
+
+    return sorted(
+        [
+            DayPlan(
+                date=_cal_date(wd),
+                weekday=wd,
+                session=sessions.get(wd, Session(REST, "Rest or active recovery (walk, stretch)")),
+            )
+            for wd in range(7)
+        ],
+        key=lambda dp: dp.date,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +267,8 @@ def generate_plan(
     cycling_days: list,
     injury: str = "none",
     start_km: Optional[float] = None,
+    runs_per_week: int = 0,
+    allow_volume_increase: bool = True,
     # Legacy single-session params — kept for backward compat, ignored if lrp_sessions non-empty
     lrp_day: Optional[int] = None,
     lrp_km: float = 12.0,
@@ -269,7 +281,7 @@ def generate_plan(
     if not lrp_sessions and lrp_day is not None:
         lrp_sessions = [{"day": lrp_day, "km": lrp_km, "type": lrp_type}]
 
-    today = date.today() + timedelta(days=1)  # plan starts tomorrow, never today
+    today = date.today() + timedelta(days=1)  # plan starts tomorrow
     weeks = max(4, min(20, (marathon_date - today).days // 7))
     peak = _peak_km(goal_time_s)
     base = start_km if start_km else peak * 0.55
@@ -281,10 +293,23 @@ def generate_plan(
         peak *= 0.70
         base *= 0.70
 
+    # Merge LRP days into available run days
     for s in lrp_sessions:
         day = s.get("day")
         if day is not None and day not in run_days:
             run_days = sorted(run_days + [day])
+
+    # Trim to desired runs_per_week, always keeping LRP days
+    if runs_per_week and 0 < runs_per_week < len(run_days):
+        lrp_days = [s["day"] for s in lrp_sessions if s.get("day") is not None]
+        non_lrp = [d for d in run_days if d not in lrp_days]
+        slots_left = max(0, runs_per_week - len(lrp_days))
+        if slots_left and non_lrp:
+            step = len(non_lrp) / slots_left
+            extra = [non_lrp[int(i * step)] for i in range(slots_left)]
+        else:
+            extra = []
+        run_days = sorted(set(lrp_days + extra))
 
     taper_start = weeks - 3
     plan = []
@@ -302,6 +327,8 @@ def generate_plan(
 
         if wk >= taper_start:
             target_km = max(peak * 0.40, peak * (1 - (wk - taper_start) * 0.22))
+        elif not allow_volume_increase:
+            target_km = base
         else:
             target_km = base + (peak - base) * ((wk - 1) / max(1, taper_start - 1))
 
@@ -342,8 +369,8 @@ def plan_to_rows(plan: list) -> list:
             rows.append({
                 "Week": w.week_num,
                 "Phase": w.phase,
-                "Date": d.date.strftime("%d %b"),
-                "Day": WEEKDAYS[d.weekday],
+                "Date": f"{d.date.day} {d.date.strftime('%B %Y')}",
+                "Day": d.date.strftime("%a"),
                 "Session": s.type,
                 "Detail": s.description,
                 "Km": f"{s.distance_km:.0f}" if s.distance_km else "—",

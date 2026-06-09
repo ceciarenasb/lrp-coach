@@ -45,14 +45,33 @@ def _time_parts(total_s: int) -> tuple:
     m, s = divmod(r, 60)
     return h, m, s
 
+
+def _iso_to_dmy(iso: str) -> str:
+    if not iso:
+        return ""
+    try:
+        return datetime.strptime(iso, "%Y-%m-%d").strftime("%d-%m-%Y")
+    except Exception:
+        return iso
+
+
+def _dmy_to_iso(dmy: str) -> str:
+    if not dmy:
+        return ""
+    try:
+        return datetime.strptime(dmy.strip(), "%d-%m-%Y").strftime("%Y-%m-%d")
+    except Exception:
+        return dmy
+
+
 _g_h, _g_m, _g_s = _time_parts(_prof.get("goal_time_s", 13500))
 
 _b1_dist_saved = _prof.get("b1_dist", "Half-marathon")
 _b1_h, _b1_m, _b1_s = _time_parts(_prof.get("b1_time_s", 6300))
-_b1_date_saved = _prof.get("b1_date", "")
+_b1_date_saved = _iso_to_dmy(_prof.get("b1_date", ""))
 _b2_dist_saved = _prof.get("b2_dist", "10 km")
 _b2_h, _b2_m, _b2_s = _time_parts(_prof.get("b2_time_s", 2850))
-_b2_date_saved = _prof.get("b2_date", "")
+_b2_date_saved = _iso_to_dmy(_prof.get("b2_date", ""))
 
 _saved_run_days = [WEEKDAY_LABELS[i] for i in _sched.get("run_days", [1, 3, 4, 5, 6])]
 _saved_strength = [WEEKDAY_LABELS[i] for i in _sched.get("strength_days", [])]
@@ -142,14 +161,16 @@ def _format_history_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _plan_to_df(plan: list) -> pd.DataFrame:
+    from datetime import date as _date
     rows = []
     for w in plan:
         for d in w["days"]:
+            _d = _date.fromisoformat(d["date"])
             rows.append({
                 "Week":    w["week_num"],
                 "Phase":   w["phase"],
-                "Date":    d["date"],
-                "Day":     ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][d["weekday"]],
+                "Date":    f"{_d.day} {_d.strftime('%B %Y')}",
+                "Day":     _d.strftime("%a"),
                 "Session": d["session_type"],
                 "Detail":  d["description"],
                 "Km":      f"{d['distance_km']:.0f}" if d.get("distance_km") else "—",
@@ -201,7 +222,9 @@ def _plan_to_html(plan: list) -> str:
         cfg = _PHASE_CONFIG.get(phase, {"accent": "#64748B", "badge_bg": "#F1F5F9", "badge_text": "#475569"})
         for d in w["days"]:
             wk_num = w["week_num"]
-            day    = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][d["weekday"]]
+            from datetime import date as _date
+            _d = _date.fromisoformat(d["date"])
+            day    = _d.strftime("%a")
             sess   = d["session_type"]
             badge_color = _SESSION_COLOR.get(sess, "#6B7280")
             km     = f"{d['distance_km']:.0f} km" if d.get("distance_km") else "—"
@@ -218,7 +241,7 @@ def _plan_to_html(plan: list) -> str:
                 f"<td style='padding:9px 10px;white-space:nowrap'>"
                 f"<span style='background:{cfg['badge_bg']};color:{cfg['badge_text']};"
                 f"padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600'>{phase}</span></td>"
-                f"<td style='padding:9px 10px;color:#9CA3AF;font-size:12px;white-space:nowrap'>{d['date']}</td>"
+                f"<td style='padding:9px 10px;color:#9CA3AF;font-size:12px;white-space:nowrap'>{_d.day} {_d.strftime('%B %Y')}</td>"
                 f"<td style='padding:9px 10px;font-weight:600;color:#374151;white-space:nowrap'>{day}</td>"
                 f"<td style='padding:9px 10px;white-space:nowrap'>"
                 f"<span style='background:{badge_color};color:#fff;padding:2px 9px;"
@@ -274,7 +297,7 @@ def load_status_on_start():
     if s.get("profile", {}).get("goal_race"):
         p = s["profile"]
         parts.append(
-            f"<b>Goal:</b> {p['goal_race']} on {p.get('marathon_date','?')}"
+            f"<b>Goal:</b> {p['goal_race']} on {_iso_to_dmy(p.get('marathon_date','')) or '?'}"
             f"&nbsp; | &nbsp;target {_fmt_duration(p.get('goal_time_s', 0))}"
         )
     if s.get("plan"):
@@ -352,7 +375,7 @@ def _profile_summary_html(profile: dict, schedule: dict, zones_data: dict) -> st
     return (
         "<div style='font-family:-apple-system,sans-serif;padding:0 4px'>"
         + row("Goal race",   p.get("goal_race", "—"))
-        + row("Race date",   p.get("marathon_date", "—"))
+        + row("Race date",   _iso_to_dmy(p.get("marathon_date", "")) or "—")
         + row("Target time", _fmt_duration(p.get("goal_time_s", 0)))
         + row("VDOT",        str(vdot))
         + row("Injury level", inj_badge)
@@ -373,6 +396,8 @@ def compute_and_generate(
     b2_dist, b2_h, b2_m, b2_s, b2_date_str,
     injury_level, injury_notes,
     run_days_labels,
+    runs_per_week,
+    allow_volume_increase,
     lrp1_day, lrp1_km, lrp1_type,
     lrp2_day, lrp2_km, lrp2_type, lrp2_visible,
     lrp3_day, lrp3_km, lrp3_type, lrp3_visible,
@@ -384,22 +409,24 @@ def compute_and_generate(
         return {"error": "Invalid goal time"}, None, "Fix errors above.", ""
 
     try:
-        marathon_date = datetime.strptime(marathon_date_str, "%Y-%m-%d").date()
+        marathon_date = datetime.strptime(marathon_date_str.strip(), "%d-%m-%Y").date()
     except Exception:
-        return {"error": "Invalid date — use YYYY-MM-DD"}, None, "Fix errors above.", ""
+        return {"error": "Invalid date — use DD-MM-YYYY"}, None, "Fix errors above.", ""
 
     b1_time  = _parse_time(b1_h, b1_m, b1_s)
     b1_m_val = DISTANCES.get(b1_dist)
     if not b1_time or not b1_m_val:
         return {"error": "Invalid benchmark 1"}, None, "Fix errors above.", ""
 
-    recency1 = vdot_recency_factor(b1_date_str) if b1_date_str else 1.0
+    b1_date_iso = _dmy_to_iso(b1_date_str) if b1_date_str else ""
+    b2_date_iso = _dmy_to_iso(b2_date_str) if b2_date_str else ""
+    recency1 = vdot_recency_factor(b1_date_iso) if b1_date_iso else 1.0
     vdot     = vdot_from_race(b1_m_val, b1_time) * recency1
     b2_time  = _parse_time(b2_h, b2_m, b2_s)
     b2_m_val = DISTANCES.get(b2_dist)
 
     if b2_time and b2_m_val and b2_m_val != b1_m_val:
-        recency2  = vdot_recency_factor(b2_date_str) if b2_date_str else 1.0
+        recency2  = vdot_recency_factor(b2_date_iso) if b2_date_iso else 1.0
         vdot2     = vdot_from_race(b2_m_val, b2_time) * recency2
         vdot      = (vdot + vdot2) / 2
         efforts   = sorted([(b1_m_val, b1_time), (b2_m_val, b2_time)])
@@ -429,6 +456,8 @@ def compute_and_generate(
         strength_days=strength,
         cycling_days=cycling,
         injury=injury_level,
+        runs_per_week=int(runs_per_week or 0),
+        allow_volume_increase=bool(allow_volume_increase),
     )
 
     new_profile = {
@@ -437,11 +466,13 @@ def compute_and_generate(
         "goal_time_s": goal_total,
         "injury_level": injury_level,
         "injury_notes": injury_notes,
-        "b1_dist": b1_dist, "b1_time_s": b1_time, "b1_date": b1_date_str or "",
-        "b2_dist": b2_dist, "b2_time_s": b2_time or 0, "b2_date": b2_date_str or "",
+        "b1_dist": b1_dist, "b1_time_s": b1_time, "b1_date": b1_date_iso or "",
+        "b2_dist": b2_dist, "b2_time_s": b2_time or 0, "b2_date": b2_date_iso or "",
     }
     new_schedule = {
         "run_days": run_days,
+        "runs_per_week": int(runs_per_week or 0),
+        "allow_volume_increase": bool(allow_volume_increase),
         "lrp_sessions": lrp_sessions,
         "strength_days": strength,
         "cycling_days": cycling,
@@ -1478,9 +1509,9 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         name_in          = gr.Textbox(label="Your name", value=_prof.get("name", "Cecilia"))
                         goal_race_in     = gr.Textbox(label="Target race", value=_prof.get("goal_race", ""),
                                                       placeholder="Paris Marathon 2027")
-                        marathon_date_in = gr.Textbox(label="Race date (YYYY-MM-DD)",
-                                                      value=_prof.get("marathon_date", ""),
-                                                      placeholder="2027-04-11")
+                        marathon_date_in = gr.Textbox(label="Race date (DD-MM-YYYY)",
+                                                      value=_iso_to_dmy(_prof.get("marathon_date", "")),
+                                                      placeholder="11-04-2027")
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Target finish time</div></div>')
                     with gr.Row():
@@ -1494,8 +1525,8 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         b1_h       = gr.Number(label="h",   value=_b1_h, precision=0, minimum=0, maximum=5)
                         b1_m       = gr.Number(label="min", value=_b1_m, precision=0, minimum=0, maximum=59)
                         b1_s       = gr.Number(label="sec", value=_b1_s, precision=0, minimum=0, maximum=59)
-                        b1_date_in = gr.Textbox(label="Date (YYYY-MM-DD)", value=_b1_date_saved,
-                                                placeholder="2025-03-15", scale=2)
+                        b1_date_in = gr.Textbox(label="Date (DD-MM-YYYY)", value=_b1_date_saved,
+                                                placeholder="15-03-2025", scale=2)
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Benchmark 2 — optional</div><div class="section-label-sub">Different distance → exact SVC via Monod-Billat. Leave zero if only one result.</div></div>')
                     with gr.Row():
@@ -1503,8 +1534,8 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         b2_h       = gr.Number(label="h",   value=_b2_h, precision=0, minimum=0, maximum=5)
                         b2_m       = gr.Number(label="min", value=_b2_m, precision=0, minimum=0, maximum=59)
                         b2_s       = gr.Number(label="sec", value=_b2_s, precision=0, minimum=0, maximum=59)
-                        b2_date_in = gr.Textbox(label="Date (YYYY-MM-DD)", value=_b2_date_saved,
-                                                placeholder="2025-01-10", scale=2)
+                        b2_date_in = gr.Textbox(label="Date (DD-MM-YYYY)", value=_b2_date_saved,
+                                                placeholder="10-01-2025", scale=2)
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Physical status</div></div>')
                     with gr.Row():
@@ -1515,11 +1546,22 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         )
                         injury_notes_in = gr.Textbox(label="Notes", value=_prof.get("injury_notes", ""), lines=2)
 
-                    gr.HTML('<div class="section-label"><div class="section-label-text">Weekly running days</div></div>')
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Weekly running days</div><div class="section-label-sub">Tick the days you are available to run</div></div>')
                     run_days_in = gr.CheckboxGroup(
                         WEEKDAY_LABELS, label="",
                         value=_saved_run_days,
                     )
+                    with gr.Row():
+                        runs_per_week_in = gr.Number(
+                            label="Runs per week (0 = use all available days)",
+                            value=_sched.get("runs_per_week", 0),
+                            precision=0, minimum=0, maximum=7,
+                            info="Limit actual sessions if you want fewer runs than available days",
+                        )
+                        allow_volume_increase_in = gr.Checkbox(
+                            label="Increase weekly volume during Build & Peak phases",
+                            value=_sched.get("allow_volume_increase", True),
+                        )
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Club / group run sessions</div><div class="section-label-sub">Locked into the plan · up to 4 sessions · not all need to be LRP</div></div>')
 
@@ -1811,6 +1853,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
             b2_dist, b2_h, b2_m, b2_s, b2_date_in,
             injury_in, injury_notes_in,
             run_days_in,
+            runs_per_week_in, allow_volume_increase_in,
             lrp1_day_in, lrp1_km_in, lrp1_type_in,
             lrp2_day_in, lrp2_km_in, lrp2_type_in, lrp2_visible_state,
             lrp3_day_in, lrp3_km_in, lrp3_type_in, lrp3_visible_state,
