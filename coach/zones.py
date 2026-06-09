@@ -83,6 +83,71 @@ def build_zones(vdot: float, cv_mps: float) -> Zones:
     )
 
 
+def vdot_recency_factor(date_str: str) -> float:
+    """
+    Discount a benchmark VDOT based on how old it is.
+    A 2-year-old race is less reliable for current training zones.
+    """
+    from datetime import date
+    try:
+        bench = date.fromisoformat(date_str)
+        age = (date.today() - bench).days
+    except Exception:
+        return 1.0
+    if age < 90:   return 1.00
+    if age < 180:  return 0.99
+    if age < 365:  return 0.97
+    if age < 730:  return 0.94
+    return 0.90
+
+
+def infer_vdot_adjustment(current_zones: "Zones", history: list) -> "Zones | None":
+    """
+    Analyse recent easy runs (last 8 weeks) and return updated Zones if
+    fitness has shifted by ≥1 VDOT point, else None.
+
+    Qualifying run: HR < 155 (or no HR data), distance 5–25 km, pace within
+    20 % of the current easy zone. Requires ≥4 qualifying runs.
+    ~4 % sustained pace improvement ≈ 1 VDOT point (Daniels approximation).
+    """
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(weeks=8)).isoformat()
+
+    paces = []
+    for r in history:
+        if r.get("date", "") < cutoff:
+            continue
+        pace_s = r.get("avg_pace_s")
+        km     = r.get("distance_km", 0)
+        hr     = r.get("avg_hr")
+        if not pace_s or km < 5 or km > 25:
+            continue
+        if hr and hr > 155:
+            continue
+        lo = current_zones.easy_hi * 0.85
+        hi = current_zones.easy_lo * 1.10
+        if lo <= pace_s <= hi:
+            paces.append(pace_s)
+
+    if len(paces) < 4:
+        return None
+
+    avg = sum(paces) / len(paces)
+    zone_mid = (current_zones.easy_lo + current_zones.easy_hi) / 2
+    drift = (zone_mid - avg) / zone_mid   # > 0 → running faster than zone
+
+    if abs(drift) < 0.04:
+        return None
+
+    vdot_delta = drift / 0.04
+    new_vdot = max(25.0, min(85.0, round(current_zones.vdot + vdot_delta, 1)))
+    if abs(new_vdot - current_zones.vdot) < 1.0:
+        return None
+
+    new_cv = current_zones.cv_mps * (new_vdot / current_zones.vdot)
+    return build_zones(new_vdot, new_cv)
+
+
 def fmt_pace(sec_per_km: int | float | None) -> str:
     if not sec_per_km or sec_per_km <= 0:
         return "n/a"
