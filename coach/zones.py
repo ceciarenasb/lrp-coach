@@ -148,6 +148,59 @@ def infer_vdot_adjustment(current_zones: "Zones", history: list) -> "Zones | Non
     return build_zones(new_vdot, new_cv)
 
 
+def pace_zones_extended(z: "Zones") -> list:
+    """All workout pace targets for display."""
+    def blend(a, b, t):
+        return round(a + (b - a) * t)
+
+    pace_5k = _spk(_v_from_pct_vo2(z.vdot, 0.955))
+    return [
+        {"workout": "Recovery jog",     "pace": fmt_pace(round(z.easy_lo * 1.10)), "rpe": "1–2", "notes": "After races or hard blocks"},
+        {"workout": "Easy  (Z2)",       "pace": f"{fmt_pace(z.easy_lo)} – {fmt_pace(z.easy_hi)}", "rpe": "3–4", "notes": "Bulk of weekly mileage"},
+        {"workout": "Long run",         "pace": fmt_pace(blend(z.easy_hi, z.easy_lo, 0.3)), "rpe": "4–5", "notes": "90 min – 3 h, start easy"},
+        {"workout": "Marathon pace",    "pace": fmt_pace(z.marathon),              "rpe": "6",   "notes": "Race pace; M-pace segments"},
+        {"workout": "Tempo  (Z3)",      "pace": fmt_pace(z.threshold),             "rpe": "7",   "notes": "20–40 min continuous"},
+        {"workout": "Cruise intervals", "pace": fmt_pace(blend(z.threshold, z.cv_interval, 0.5)), "rpe": "7–8", "notes": "5 × 1 km, 1 min rest"},
+        {"workout": "SVC  (Z4)",        "pace": fmt_pace(z.cv_interval),           "rpe": "8",   "notes": "8–10 × 1 km, 2 min rest"},
+        {"workout": "5 K pace",         "pace": fmt_pace(pace_5k),                 "rpe": "8–9", "notes": ""},
+        {"workout": "1600 m / I pace",  "pace": fmt_pace(z.interval),              "rpe": "9",   "notes": "4–5 reps · 3–4 min rest"},
+        {"workout": "1000 m",           "pace": fmt_pace(z.interval),              "rpe": "9",   "notes": "5–6 reps · 3 min rest"},
+        {"workout": "800 m",            "pace": fmt_pace(blend(z.interval, z.rep, 0.45)), "rpe": "9–10", "notes": "6–8 reps · 2–3 min rest"},
+        {"workout": "400 m  (R pace)",  "pace": fmt_pace(z.rep),                   "rpe": "10",  "notes": "6–12 reps · full rest"},
+        {"workout": "200 m",            "pace": fmt_pace(round(z.rep * 0.96)),      "rpe": "10",  "notes": "8–12 reps · full rest"},
+    ]
+
+
+def hr_zones(hr_max: int, hr_rest: int = 50) -> list:
+    """6-zone Karvonen (HRR) model — mirrors Cecilia's actual coach configuration."""
+    hrr = hr_max - hr_rest
+    def kv(pct): return round(hr_rest + pct * hrr)
+    bands = [
+        (1, "Zone 1",        0.60, 0.70, "#94A3B8", "Séance à basse intensité"),
+        (2, "Zone 1 IM",     0.70, 0.77, "#10B981", "Sous SV1 jusqu'à SV1"),
+        (3, "Zone 2 HIM",    0.77, 0.85, "#F59E0B", "Entre les deux seuils (SV1–SV2)"),
+        (4, "Zone 2 M",      0.85, 0.90, "#F97316", "Proche ou à SV2 / intensité critique"),
+        (5, "Zone 3 HIT i",  0.90, 0.94, "#EF4444", "Dérive VO₂ vers VO₂max"),
+        (6, "Zone 3 HIT ii", 0.94, 1.00, "#DC2626", "Travail court à VO₂max"),
+    ]
+    return [
+        {"zone": n, "name": nm, "lo": kv(lo), "hi": kv(hi), "color": c, "desc": d}
+        for n, nm, lo, hi, c, d in bands
+    ]
+
+
+def marathon_time_from_vdot(vdot: float) -> int:
+    """Marathon finish time (seconds) for a given VDOT — binary search."""
+    lo, hi = 5400, 21600  # 1:30 → 6:00
+    for _ in range(40):
+        mid = (lo + hi) // 2
+        if vdot_from_race(42195, mid) > vdot:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) // 2
+
+
 def fmt_pace(sec_per_km: int | float | None) -> str:
     if not sec_per_km or sec_per_km <= 0:
         return "n/a"

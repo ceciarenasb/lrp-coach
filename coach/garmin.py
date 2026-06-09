@@ -121,9 +121,36 @@ def get_client() -> Optional["Garmin"]:
 
 # ── Activity sync ──────────────────────────────────────────────────────────
 
+_GARMIN_TYPE_MAP = {
+    "running":              "Run",
+    "trail_running":        "Run",
+    "treadmill_running":    "Run",
+    "virtual_run":          "Run",
+    "cycling":              "Cycling",
+    "road_biking":          "Cycling",
+    "mountain_biking":      "Cycling",
+    "gravel_cycling":       "Cycling",
+    "indoor_cycling":       "Indoor Cycling",
+    "virtual_ride":         "Indoor Cycling",
+    "spin":                 "Indoor Cycling",
+    "strength_training":    "Strength",
+    "fitness_equipment":    "Strength",
+    "yoga":                 "Yoga",
+    "walking":              "Walking",
+    "hiking":               "Hiking",
+    "swimming":             "Swimming",
+    "open_water_swimming":  "Swimming",
+}
+
+
+def _garmin_activity_type(act: dict) -> str:
+    key = (act.get("activityType") or {}).get("typeKey", "")
+    return _GARMIN_TYPE_MAP.get(key.lower(), "Other")
+
+
 def sync_activities(days: int = 30) -> tuple[list[dict], str]:
     """
-    Download running activities from the last N days, parse via fit.summarize,
+    Download all activities from the last N days, parse via fit.summarize,
     and return (records, status_message).
     """
     from coach.fit import summarize as fit_summarize
@@ -137,13 +164,13 @@ def sync_activities(days: int = 30) -> tuple[list[dict], str]:
 
     try:
         activities = client.get_activities_by_date(
-            start_dt.isoformat(), end_dt.isoformat(), "running"
+            start_dt.isoformat(), end_dt.isoformat()
         )
     except Exception as exc:
         return [], f"Failed to fetch activity list: {exc}"
 
     if not activities:
-        return [], f"No running activities found in the last {days} days."
+        return [], f"No activities found in the last {days} days."
 
     records, errors = [], []
 
@@ -157,12 +184,13 @@ def sync_activities(days: int = 30) -> tuple[list[dict], str]:
             )
             record = _parse_fit_from_zip(zip_data, fit_summarize)
             if record:
+                record.setdefault("activity_type", _garmin_activity_type(act))
                 records.append(record)
         except Exception as exc:
             errors.append(act_name)
             logger.warning("Could not sync '%s' (%s): %s", act_name, activity_id, exc)
 
-    msg = f"Synced {len(records)} run{'s' if len(records) != 1 else ''}"
+    msg = f"Synced {len(records)} activit{'ies' if len(records) != 1 else 'y'}"
     if errors:
         msg += f"  ({len(errors)} skipped)"
     return records, msg

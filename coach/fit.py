@@ -5,6 +5,40 @@ from __future__ import annotations
 import fitdecode
 import pandas as pd
 
+_FIT_SPORT_MAP = {
+    "running":          "Run",
+    "cycling":          "Cycling",
+    "swimming":         "Swimming",
+    "walking":          "Walking",
+    "hiking":           "Hiking",
+    "yoga":             "Yoga",
+    "training":         "Strength",
+    "fitness_equipment":"Strength",
+    "generic":          "Other",
+}
+_FIT_SUB_MAP = {
+    "indoor_cycling":   "Indoor Cycling",
+    "spin":             "Indoor Cycling",
+    "virtual_activity": "Indoor Cycling",
+    "strength_training":"Strength",
+    "cardio":           "Strength",
+}
+
+
+def _detect_sport(path: str) -> str:
+    try:
+        with fitdecode.FitReader(path) as fit:
+            for frame in fit:
+                if frame.frame_type == fitdecode.FIT_FRAME_DATA and frame.name == "sport":
+                    sport = str(frame.get_value("sport") or "").lower()
+                    sub   = str(frame.get_value("sub_sport") or "").lower()
+                    if sub in _FIT_SUB_MAP:
+                        return _FIT_SUB_MAP[sub]
+                    return _FIT_SPORT_MAP.get(sport, "Other")
+    except Exception:
+        pass
+    return "Run"
+
 
 def _parse_records(path: str) -> pd.DataFrame:
     rows = []
@@ -64,6 +98,7 @@ def summarize(path: str) -> dict | None:
 
         return {
             "date":               str(df["timestamp"].iloc[0].date()),
+            "activity_type":      _detect_sport(path),
             "distance_km":        round(dist_km, 2),
             "duration_s":         int(duration_s),
             "avg_pace_s":         round(avg_pace_s) if avg_pace_s else None,

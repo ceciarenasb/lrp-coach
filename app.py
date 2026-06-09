@@ -17,8 +17,8 @@ from coach.adapt import WeekMetrics, score_week
 from coach.plan import generate_plan
 from coach.zones import (
     Zones, build_zones, cv_from_two_efforts, cv_from_vdot,
-    fmt_pace, infer_vdot_adjustment, vdot_from_race, vdot_recency_factor,
-    zones_summary,
+    fmt_pace, hr_zones, infer_vdot_adjustment, marathon_time_from_vdot,
+    pace_zones_extended, vdot_from_race, vdot_recency_factor, zones_summary,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -147,17 +147,234 @@ def _format_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if "hr_drift_pct" in d.columns:
         d["hr_drift_pct"] = d["hr_drift_pct"].apply(
             lambda x: f"{float(x):.1f}%" if pd.notna(x) and x else "—")
+    if "date" in d.columns:
+        def _fmt_date(v):
+            try:
+                from datetime import date as _date
+                parts = str(v).split("-")
+                if len(parts) == 3 and len(parts[0]) == 4:
+                    return f"{parts[2]}-{parts[1]}-{parts[0]}"
+            except Exception:
+                pass
+            return v
+        d["date"] = d["date"].apply(_fmt_date)
+    if "activity_type" not in d.columns:
+        d["activity_type"] = "Run"
+    else:
+        d["activity_type"] = d["activity_type"].fillna("Run").replace("", "Run")
     d = d.rename(columns={
-        "date": "Date", "distance_km": "Distance (km)", "duration_s": "Duration",
+        "date": "Date", "activity_type": "Type",
+        "distance_km": "Distance (km)", "duration_s": "Duration",
         "avg_pace_s": "Avg Pace", "avg_hr": "Avg HR", "max_hr": "Max HR",
         "hr_drift_pct": "HR Drift", "avg_cadence_spm": "Cadence",
         "elevation_gain_m": "Elevation (m)",
     })
-    order = ["Date", "Distance (km)", "Duration", "Avg Pace", "Avg HR",
+    order = ["Date", "Type", "Distance (km)", "Duration", "Avg Pace", "Avg HR",
              "HR Drift", "Elevation (m)", "Cadence", "Max HR"]
     cols = [c for c in order if c in d.columns] + \
            [c for c in d.columns if c not in order]
     return d[cols]
+
+
+_HIST_PER_PAGE = 15
+
+
+def _hist_page_html(df, page: int):
+    """Returns (table_html, page_int, info_html) for one page of the activity log."""
+    if df is None or not hasattr(df, "__len__") or len(df) == 0:
+        return (
+            "<p style='color:#9CA3AF;padding:24px;text-align:center'>"
+            "No activities yet. Upload FIT files or sync from Garmin.</p>",
+            0,
+            "<div style='text-align:center;padding:6px;font-size:12px;color:#9CA3AF'>0 activities</div>",
+        )
+    per = _HIST_PER_PAGE
+    total = len(df)
+    pages = max(1, (total + per - 1) // per)
+    page = max(0, min(page, pages - 1))
+    start = page * per
+    subset = df.iloc[start:start + per]
+    cols = list(df.columns)
+    _th = ("padding:8px 10px;text-align:left;font-size:11px;font-weight:700;"
+           "color:#111827;text-transform:uppercase;background:#F0F2F5;"
+           "border-bottom:2px solid #9CA3AF;white-space:nowrap")
+    _td = "padding:7px 10px;font-size:12px;color:#374151;white-space:nowrap;border-bottom:1px solid #F3F4F6"
+    header = "".join(f"<th style='{_th}'>{c}</th>" for c in cols)
+    body = ""
+    for i, (_, row) in enumerate(subset.iterrows()):
+        bg = "#ffffff" if i % 2 == 0 else "#F8F9FA"
+        cells = "".join(
+            f"<td style='{_td}'>{v if pd.notna(v) else '—'}</td>"
+            for v in (row[c] for c in cols)
+        )
+        body += f"<tr style='background:{bg}'>{cells}</tr>"
+    html = (
+        "<div style='overflow-x:auto;border:1px solid #E5E7EB;border-radius:8px'>"
+        "<table style='width:100%;border-collapse:collapse;font-family:-apple-system,sans-serif'>"
+        f"<thead><tr>{header}</tr></thead><tbody>{body}</tbody>"
+        "</table></div>"
+    )
+    info = (
+        f"<div style='text-align:center;padding:6px 0;font-size:12px;color:#6B7280'>"
+        f"Page {page + 1} of {pages} · {total} activities</div>"
+    )
+    return html, page, info
+
+
+def _hist_reset_page(df):
+    return _hist_page_html(df, 0)
+
+
+def _hist_prev_page(df, page):
+    return _hist_page_html(df, page - 1)
+
+
+def _hist_next_page(df, page):
+    return _hist_page_html(df, page + 1)
+
+
+# ── Zones tab rendering ────────────────────────────────────────────────────
+
+_RPE_COLOR = {
+    "1–2": "#94A3B8", "3–4": "#10B981", "4–5": "#10B981",
+    "6": "#3B82F6", "7": "#F59E0B", "7–8": "#F59E0B",
+    "8": "#F97316", "8–9": "#F97316", "9": "#EF4444",
+    "9–10": "#EF4444", "10": "#DC2626",
+}
+
+
+def _pace_zones_html(zones_data: dict) -> str:
+    if not zones_data:
+        return "<p style='color:#9CA3AF;padding:24px;text-align:center'>No zones yet — complete Setup &amp; Plan first.</p>"
+    z = Zones(**{k: zones_data[k] for k in Zones.__dataclass_fields__})
+    rows = pace_zones_extended(z)
+    th = ("padding:9px 12px;text-align:left;font-size:11px;font-weight:600;"
+          "color:#6B7280;text-transform:uppercase;letter-spacing:.04em;"
+          "background:#F9FAFB;border-bottom:1px solid #E5E7EB")
+    body = ""
+    for i, r in enumerate(rows):
+        bg = "#fff" if i % 2 == 0 else "#F5F7FA"
+        col = _RPE_COLOR.get(r["rpe"], "#6B7280")
+        body += (
+            f"<tr style='background:{bg}'>"
+            f"<td style='padding:8px 12px;font-weight:600;color:#111827;font-size:13px'>{r['workout']}</td>"
+            f"<td style='padding:8px 12px;font-weight:700;color:#1B2874;font-size:13px;font-variant-numeric:tabular-nums'>{r['pace']}</td>"
+            f"<td style='padding:8px 12px;text-align:center'>"
+            f"<span style='background:{col};color:#fff;padding:2px 7px;border-radius:99px;font-size:11px;font-weight:700'>RPE&nbsp;{r['rpe']}</span></td>"
+            f"<td style='padding:8px 12px;color:#6B7280;font-size:12px'>{r['notes']}</td>"
+            f"</tr>"
+        )
+    return (
+        f"<table style='width:100%;border-collapse:collapse;border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;font-family:-apple-system,sans-serif'>"
+        f"<thead><tr>"
+        f"<th style='{th}'>Workout</th><th style='{th}'>Pace</th>"
+        f"<th style='{th}'>Effort</th><th style='{th}'>Notes</th>"
+        f"</tr></thead><tbody>{body}</tbody></table>"
+    )
+
+
+def _hr_zones_html(hr_max: int, hr_rest: int = 50) -> str:
+    if not hr_max or hr_max < 100:
+        return "<p style='color:#9CA3AF;padding:24px;text-align:center'>Enter your max heart rate above to see HR zones.</p>"
+    body = ""
+    for z in hr_zones(int(hr_max), int(hr_rest)):
+        bar_w = min(100, max(20, round((z["hi"] - z["lo"]) * 5)))
+        body += (
+            f"<tr>"
+            f"<td style='padding:10px 14px'>"
+            f"<div style='display:flex;align-items:center;gap:10px'>"
+            f"<span style='width:30px;height:30px;border-radius:50%;background:{z['color']};"
+            f"display:inline-flex;align-items:center;justify-content:center;"
+            f"font-weight:700;color:#fff;font-size:13px;flex-shrink:0'>Z{z['zone']}</span>"
+            f"<div><div style='font-weight:600;font-size:13px;color:#111827'>{z['name']}</div>"
+            f"<div style='font-size:11px;font-weight:600;color:#374151'>{z['desc']}</div></div></div></td>"
+            f"<td style='padding:10px 14px;font-weight:700;color:#1B2874;"
+            f"font-variant-numeric:tabular-nums;white-space:nowrap;font-size:13px'>"
+            f"{z['lo']}–{z['hi']} bpm</td>"
+            f"<td style='padding:10px 14px;width:120px'>"
+            f"<div style='background:#F3F4F6;border-radius:4px;height:8px'>"
+            f"<div style='background:{z['color']};height:8px;border-radius:4px;width:{bar_w}%'>"
+            f"</div></div></td>"
+            f"</tr>"
+        )
+    return (
+        f"<div style='background:#F0FBF4;border-radius:10px;padding:10px 4px'>"
+        f"<table style='width:100%;border-collapse:collapse;font-family:-apple-system,sans-serif'>"
+        f"<tbody>{body}</tbody></table></div>"
+    )
+
+
+def _hr_max_from_history(history: list) -> int:
+    vals = [r.get("max_hr") for r in history if r.get("max_hr")]
+    return int(max(vals)) if vals else 0
+
+
+def _target_assessment(profile: dict, zones_data: dict, plan: list) -> tuple:
+    """Returns (html, show_buttons, realistic_time_s)."""
+    if not profile or not zones_data:
+        return "", False, None
+    goal_time_s = profile.get("goal_time_s", 0)
+    current_vdot = zones_data.get("vdot", 0)
+    if not goal_time_s or not current_vdot:
+        return "", False, None
+
+    goal_vdot = vdot_from_race(42195, goal_time_s)
+    plan_weeks = len(plan) if plan else 16
+
+    max_gain = 7.0 if current_vdot < 40 else 5.0 if current_vdot < 50 else 3.0
+    realistic_gain = min(max_gain, plan_weeks * 0.3)
+    realistic_vdot = current_vdot + realistic_gain
+    realistic_time_s = marathon_time_from_vdot(realistic_vdot)
+    gap = goal_vdot - current_vdot
+
+    def _t(s):
+        h, r = divmod(int(s), 3600)
+        m, sec = divmod(r, 60)
+        return f"{h}:{m:02d}:{sec:02d}"
+
+    cur_marathon_s = marathon_time_from_vdot(current_vdot)
+
+    if gap <= -1:
+        bg, border, icon = "#F0FDF4", "#86EFAC", "✓"
+        msg = (f"Your goal of <b>{_t(goal_time_s)}</b> is within your current fitness — "
+               f"you're already performing at a level equivalent to <b>{_t(cur_marathon_s)}</b>. "
+               f"You may want to set a more ambitious target.")
+        show_buttons = False
+        realistic_time_s = None
+    elif gap <= 3:
+        bg, border, icon = "#EFF6FF", "#93C5FD", "🎯"
+        msg = (f"Your goal of <b>{_t(goal_time_s)}</b> is well-calibrated. "
+               f"Current fitness: <b>{_t(cur_marathon_s)}</b> equivalent (VDOT {current_vdot:.1f}). "
+               f"A gain of {gap:.1f} VDOT points over {plan_weeks} weeks is very achievable with consistent training.")
+        show_buttons = False
+        realistic_time_s = None
+    elif gap <= realistic_gain + 1:
+        bg, border, icon = "#FFFBEB", "#FCD34D", "⚡"
+        msg = (f"Your goal of <b>{_t(goal_time_s)}</b> is ambitious but realistic. "
+               f"You're currently at <b>{_t(cur_marathon_s)}</b> equivalent (VDOT {current_vdot:.1f}). "
+               f"You'll need to improve by {gap:.1f} VDOT points — expect this to take "
+               f"serious, consistent training over all {plan_weeks} weeks.")
+        show_buttons = False
+        realistic_time_s = None
+    else:
+        bg, border, icon = "#FFF7ED", "#FDBA74", "⚠️"
+        msg = (f"Your goal of <b>{_t(goal_time_s)}</b> requires a VDOT of {goal_vdot:.1f}, "
+               f"but your current fitness puts you at VDOT {current_vdot:.1f} "
+               f"(<b>{_t(cur_marathon_s)}</b> equivalent). "
+               f"Improving by {gap:.1f} points in {plan_weeks} weeks would be exceptionally rare — "
+               f"most runners in your range can realistically gain {realistic_gain:.0f}–{realistic_gain+1:.0f} points. "
+               f"A more achievable goal for this cycle is <b>{_t(realistic_time_s)}</b> (VDOT {realistic_vdot:.1f}). "
+               f"You can still chase your original goal — just know the plan will be built around a target "
+               f"that pushes the limits of what's physiologically possible for this timeframe.")
+        show_buttons = True
+
+    html = (
+        f"<div style='background:{bg};border:1px solid {border};border-radius:10px;"
+        f"padding:14px 18px;margin-bottom:4px;font-family:-apple-system,sans-serif'>"
+        f"<div style='font-size:13px;color:#374151;line-height:1.6'>"
+        f"<span style='font-size:16px;margin-right:6px'>{icon}</span>{msg}</div></div>"
+    )
+    return html, show_buttons, realistic_time_s
 
 
 def _plan_to_df(plan: list) -> pd.DataFrame:
@@ -202,88 +419,148 @@ _SESSION_COLOR = {
 }
 
 
-def _plan_to_html(plan: list) -> str:
+_PLAN_EMPTY = (
+    "<div style='text-align:center;padding:56px 0;color:#9CA3AF;"
+    "font-family:-apple-system,sans-serif'>"
+    "<div style='font-size:44px;margin-bottom:12px'>🏃</div>"
+    "<div style='font-size:15px;font-weight:600;color:#374151'>No plan yet</div>"
+    "<div style='font-size:13px;margin-top:6px'>Go to Setup &amp; Plan to generate your training plan.</div>"
+    "</div>"
+)
+
+
+def _session_hr_text(session_type: str, desc: str, zones: list) -> str:
+    """Return per-segment HR guidance using actual Karvonen zone bpm values."""
+    if not zones or session_type in ("Rest", "Strength", "Cycling / Zwift"):
+        return "—"
+    def z(n):
+        info = zones[n - 1]
+        return f"{info['name']} ({info['lo']}–{info['hi']})"
+    if session_type in ("Recovery",):
+        return f"Throughout: {z(1)}"
+    if session_type == "Easy":
+        return f"Throughout: {z(1)} – {z(2)}"
+    if session_type == "Long Run":
+        if "M-pace" in desc:
+            return f"Main: {z(1)}–{z(2)} · Finish: {z(3)}"
+        return f"Throughout: {z(1)} – {z(2)}"
+    if session_type == "Tempo":
+        return f"Warm-up: {z(1)} · Effort: {z(4)} · Cool-down: {z(1)}"
+    if session_type == "SVC Intervals":
+        return f"Warm-up: {z(1)}–{z(2)} · Intervals: {z(5)} · Récup: {z(1)} · Cool-down: {z(2)}"
+    if session_type == "Marathon Pace":
+        return f"Warm-up: {z(1)} · M-pace: {z(3)} · Cool-down: {z(1)}"
+    if session_type == "Club Run (LRP)":
+        if "tempo" in desc.lower():
+            return f"Warm-up: {z(1)} · Effort: {z(4)}–{z(5)} · Cool-down: {z(1)}"
+        if "long" in desc.lower():
+            return f"Throughout: {z(1)} – {z(2)}"
+        return f"Throughout: {z(1)} – {z(2)}"
+    return f"{z(1)} – {z(2)}"
+
+
+def _plan_phase_html(plan: list, phase: str, hr_max: int = 177, hr_rest: int = 50) -> str:
+    """Render the plan table for a single phase with Details + Target HR columns."""
     if not plan:
-        return (
-            "<div style='text-align:center;padding:56px 0;color:#9CA3AF;"
-            "font-family:-apple-system,sans-serif'>"
-            "<div style='font-size:44px;margin-bottom:12px'>🏃</div>"
-            "<div style='font-size:15px;font-weight:600;color:#374151'>No plan yet</div>"
-            "<div style='font-size:13px;margin-top:6px'>Go to Setup & Plan to generate your training plan.</div>"
-            "</div>"
-        )
+        return _PLAN_EMPTY
+    from coach.zones import hr_zones as _hr_zones
+    zones = _hr_zones(int(hr_max), int(hr_rest))
+    weeks = [w for w in plan if w["phase"] == phase]
+    if not weeks:
+        available = sorted({w["phase"] for w in plan}, key=lambda p: ["Base","Build","Peak","Taper"].index(p) if p in ["Base","Build","Peak","Taper"] else 99)
+        return f"<p style='color:#9CA3AF;padding:24px'>No {phase} weeks in this plan. Available phases: {', '.join(available)}</p>"
+
+    cfg = _PHASE_CONFIG.get(phase, {"accent": "#64748B", "badge_bg": "#F1F5F9", "badge_text": "#475569"})
+    focus = weeks[0].get("focus", "")
+    header = (
+        f"<div style='background:{cfg['accent']};border-radius:10px 10px 0 0;padding:10px 16px;"
+        f"color:#fff;font-family:-apple-system,sans-serif'>"
+        f"<span style='font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em'>{phase}</span>"
+        f"<span style='font-size:12px;opacity:.85;margin-left:12px'>{focus}</span>"
+        f"<span style='float:right;font-size:11px;opacity:.75'>Weeks {weeks[0]['week_num']}–{weeks[-1]['week_num']}</span>"
+        f"</div>"
+    )
 
     rows_html = ""
     prev_week = None
     row_idx = 0
-
-    for w in plan:
-        phase = w["phase"]
-        cfg = _PHASE_CONFIG.get(phase, {"accent": "#64748B", "badge_bg": "#F1F5F9", "badge_text": "#475569"})
+    for w in weeks:
+        from datetime import date as _date
         for d in w["days"]:
-            wk_num = w["week_num"]
-            from datetime import date as _date
             _d = _date.fromisoformat(d["date"])
-            day    = _d.strftime("%a")
-            sess   = d["session_type"]
+            day  = _d.strftime("%a")
+            sess = d["session_type"]
+            desc = d["description"]
             badge_color = _SESSION_COLOR.get(sess, "#6B7280")
-            km     = f"{d['distance_km']:.0f} km" if d.get("distance_km") else "—"
-            desc   = d["description"]
-            targets = " · ".join(f"{k}: {v}" for k, v in d.get("targets", {}).items()) or "—"
-            week_sep = "border-top:2px solid #E5E7EB;" if wk_num != prev_week else ""
-            prev_week = wk_num
+            km   = f"{d['distance_km']:.0f} km" if d.get("distance_km") else "—"
+            targets = " · ".join(f"{k}: {v}" for k, v in d.get("targets", {}).items())
+            detail = f"{desc}<br><span style='color:#9CA3AF;font-size:11px'>{targets}</span>" if targets else desc
+            hr_text = _session_hr_text(sess, desc, zones)
+            week_sep = "border-top:2px solid #E5E7EB;" if w["week_num"] != prev_week else ""
+            prev_week = w["week_num"]
             row_bg = "#ffffff" if row_idx % 2 == 0 else "#FAFAFA"
             row_idx += 1
+            accent = cfg["accent"]
             rows_html += (
                 f"<tr style='background:{row_bg};{week_sep}'>"
-                f"<td style='padding:9px 12px;font-weight:700;color:#1B2874;"
-                f"border-left:3px solid {cfg['accent']};white-space:nowrap'>{wk_num}</td>"
-                f"<td style='padding:9px 10px;white-space:nowrap'>"
-                f"<span style='background:{cfg['badge_bg']};color:{cfg['badge_text']};"
-                f"padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600'>{phase}</span></td>"
-                f"<td style='padding:9px 10px;color:#9CA3AF;font-size:12px;white-space:nowrap'>{_d.day} {_d.strftime('%B %Y')}</td>"
-                f"<td style='padding:9px 10px;font-weight:600;color:#374151;white-space:nowrap'>{day}</td>"
-                f"<td style='padding:9px 10px;white-space:nowrap'>"
+                f"<td style='padding:7px 10px;color:#9CA3AF;font-size:12px;white-space:nowrap;"
+                f"border-left:3px solid {accent}'>{_d.day} {_d.strftime('%b')}</td>"
+                f"<td style='padding:7px 10px;font-weight:600;color:#374151;white-space:nowrap'>{day}</td>"
+                f"<td style='padding:7px 10px;white-space:nowrap'>"
                 f"<span style='background:{badge_color};color:#fff;padding:2px 9px;"
                 f"border-radius:99px;font-size:11px;font-weight:700'>{sess}</span></td>"
-                f"<td style='padding:9px 10px;color:#374151;font-size:13px'>{desc}</td>"
-                f"<td style='padding:9px 10px;text-align:center;font-weight:700;"
-                f"color:#1B2874;white-space:nowrap'>{km}</td>"
-                f"<td style='padding:9px 10px;color:#9CA3AF;font-size:12px'>{targets}</td>"
+                f"<td style='padding:7px 10px;color:#374151;font-size:12px'>{detail}</td>"
+                f"<td style='padding:7px 10px;color:#374151;font-size:11px;line-height:1.5'>{hr_text}</td>"
+                f"<td style='padding:7px 10px;text-align:center;font-weight:700;"
+                f"color:#1B2874;white-space:nowrap;font-size:12px'>{km}</td>"
                 f"</tr>"
             )
 
-    _th = ("padding:12px 10px;text-align:left;font-weight:600;"
-           "font-size:11px;letter-spacing:0.05em;text-transform:uppercase;color:#fff")
-    return (
-        "<div style='overflow-x:auto;border-radius:12px;"
-        "border:1px solid #F5871F;"
-        "box-shadow:0 2px 8px rgba(0,0,0,0.06);"
+    _th = ("padding:10px 10px;text-align:left;font-weight:600;"
+           "font-size:11px;letter-spacing:0.05em;text-transform:uppercase;color:#fff;background:#1B2874")
+    table = (
+        "<div style='overflow-x:auto;border-radius:0 0 10px 10px;"
+        "border:1px solid #E5E7EB;border-top:none;"
         "font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif'>"
         "<table style='width:100%;border-collapse:collapse;font-size:13px'>"
         "<thead>"
-        f"<tr style='background:#F5871F'>"
-        f"<th style='{_th};white-space:nowrap;padding-left:12px'>Wk</th>"
-        f"<th style='{_th}'>Phase</th>"
+        f"<tr>"
         f"<th style='{_th}'>Date</th>"
         f"<th style='{_th}'>Day</th>"
         f"<th style='{_th}'>Session</th>"
-        f"<th style='{_th}'>Details</th>"
+        f"<th style='{_th}'>Details &amp; Targets</th>"
+        f"<th style='{_th}'>Target HR</th>"
         f"<th style='{_th};text-align:center'>Km</th>"
-        f"<th style='{_th}'>Targets</th>"
         "</tr>"
         "</thead>"
         f"<tbody>{rows_html}</tbody>"
-        "</table>"
-        "</div>"
+        "</table></div>"
     )
+    return header + table
+
+
+def _plan_to_html(plan: list) -> str:
+    """Used by adjustments/checkin tabs — full plan, all phases."""
+    if not plan:
+        return _PLAN_EMPTY
+    return _plan_phase_html(plan, plan[0]["phase"] if plan else "Base")
 
 
 # ── Startup loaders ────────────────────────────────────────────────────────
 
 def load_plan_on_start():
-    plan = state_mod.load().get("plan", [])
-    return _plan_to_html(plan)
+    s = state_mod.load()
+    plan = s.get("plan", [])
+    hr_max = s.get("hr_max", 177)
+    hr_rest = s.get("hr_rest", 50)
+    phases = [w["phase"] for w in plan]
+    first = next((p for p in ["Base", "Build", "Peak", "Taper"] if p in phases), "Base")
+    return _plan_phase_html(plan, first, hr_max, hr_rest)
+
+
+def render_plan_phase(phase):
+    s = state_mod.load()
+    return _plan_phase_html(s.get("plan", []), phase, s.get("hr_max", 177), s.get("hr_rest", 50))
 
 
 def load_history_on_start():
@@ -311,6 +588,40 @@ def load_status_on_start():
         "font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;line-height:1.4'>"
         + text + "</div>"
     )
+
+
+def load_zones_tab():
+    s = state_mod.load()
+    zd = s.get("zones", {})
+    profile = s.get("profile", {})
+    history = s.get("history", [])
+
+    if not zd:
+        empty = "<p style='color:#9CA3AF;padding:32px;text-align:center'>No zones calculated yet — complete Setup &amp; Plan first.</p>"
+        return empty, 177, 50, empty, empty
+
+    hr_max = s.get("hr_max") or _hr_max_from_history(history) or 177
+    hr_rest = s.get("hr_rest") or 50
+    vdot = zd.get("vdot", 0)
+    cur_equiv_s = marathon_time_from_vdot(vdot) if vdot else 0
+    goal_s = profile.get("goal_time_s", 0)
+    goal_str = f" · Goal: <b>{_fmt_duration(goal_s)}</b>" if goal_s else ""
+    header = (
+        "<div style='background:#1B2874;border-radius:8px;padding:10px 18px;margin-bottom:4px;"
+        "color:#fff;font-family:-apple-system,sans-serif;font-size:13px'>"
+        f"<b>VDOT {vdot:.1f}</b> · Marathon equivalent: <b>{_fmt_duration(cur_equiv_s)}</b>{goal_str}</div>"
+    ) if vdot else ""
+    return header, int(hr_max), int(hr_rest), _pace_zones_html(zd), _hr_zones_html(int(hr_max), int(hr_rest))
+
+
+def update_zones_hr(hr_max, hr_rest):
+    s = state_mod.load()
+    if hr_max:
+        s["hr_max"] = int(hr_max)
+    if hr_rest:
+        s["hr_rest"] = int(hr_rest)
+    state_mod.save(s)
+    return _hr_zones_html(int(hr_max or 177), int(hr_rest or 50))
 
 
 # ── Tab 1: Setup & plan generation ────────────────────────────────────────
@@ -403,6 +714,7 @@ def compute_and_generate(
     lrp3_day, lrp3_km, lrp3_type, lrp3_visible,
     lrp4_day, lrp4_km, lrp4_type, lrp4_visible,
     strength_labels, cycling_labels,
+    hr_rest_val=50,
 ):
     goal_total = _parse_time(goal_h, goal_m, goal_s)
     if not goal_total:
@@ -479,6 +791,8 @@ def compute_and_generate(
     }
 
     existing = state_mod.load()
+    if hr_rest_val:
+        existing["hr_rest"] = int(hr_rest_val)
     existing.update({
         "profile": new_profile,
         "zones": zones.__dict__,
@@ -512,7 +826,10 @@ def compute_and_generate(
            f"VDOT {zones.vdot}  |  SVC {zones.cv_mps * 3.6:.1f} km/h  |  "
            f"Target {_fmt_duration(goal_total)}{recency_note}")
     summary_html = _profile_summary_html(new_profile, new_schedule, zones.__dict__)
-    return zs, _plan_to_html(existing["plan"]), msg, summary_html
+    hr_rest_saved = existing.get("hr_rest", 50)
+    hr_max_saved = existing.get("hr_max", 177)
+    plan_html = _plan_phase_html(existing["plan"], "Base", hr_max_saved, hr_rest_saved)
+    return zs, plan_html, msg, summary_html
 
 
 # ── Tab 2: Run history ─────────────────────────────────────────────────────
@@ -1146,7 +1463,8 @@ body, .gradio-container {
 #panel-setup .block,
 #panel-history .block:not(.gradio-dataframe),
 #panel-adj .block:not(.gradio-dataframe),
-#panel-checkin .block:not(.gradio-dataframe) {
+#panel-checkin .block:not(.gradio-dataframe),
+#panel-zones .block {
     background: white !important;
     border: 1px solid #E5E7EB !important;
     box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
@@ -1407,7 +1725,7 @@ body, .gradio-container {
 
 # ── UI ─────────────────────────────────────────────────────────────────────
 
-_NAV_COUNT = 5
+_NAV_COUNT = 6
 
 def _nav_handler(active_i):
     """Return a click handler that shows panel[active_i] and highlights its button."""
@@ -1458,9 +1776,10 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
             """)
             btn_plan    = gr.Button("📋  My Plan",          variant="primary",   elem_classes="nav-btn", elem_id="nav-plan")
             btn_setup   = gr.Button("⚙️  Setup & Plan",     variant="secondary", elem_classes="nav-btn")
-            btn_hist    = gr.Button("🏃  Run History",      variant="secondary", elem_classes="nav-btn")
+            btn_hist    = gr.Button("🏃  Activity Log",      variant="secondary", elem_classes="nav-btn")
             btn_adj     = gr.Button("✏️  Adjustments",      variant="secondary", elem_classes="nav-btn")
             btn_checkin = gr.Button("✅  Weekly Check-in",  variant="secondary", elem_classes="nav-btn")
+            btn_zones   = gr.Button("📊  My Zones",         variant="secondary", elem_classes="nav-btn")
 
         # ── Content area ──────────────────────────────────────────────────
         with gr.Column(scale=5, elem_id="content-area"):
@@ -1477,6 +1796,10 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         </div>
                     </div>
                 """)
+                plan_phase_radio = gr.Radio(
+                    ["Base", "Build", "Peak", "Taper"],
+                    value="Base", label="Phase", container=False,
+                )
                 plan_df = gr.HTML()
 
             # Panel 1 — Setup & Plan
@@ -1498,6 +1821,15 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
 
                 with gr.Group(visible=_has_plan, elem_id="setup-summary") as setup_summary:
                     profile_summary_html = gr.HTML(_init_summary)
+                    _init_tgt, _init_show_tgt_btns, _init_realistic_s = (
+                        _target_assessment(_prof, _saved.get("zones", {}), _saved.get("plan", []))
+                        if _has_plan else ("", False, None)
+                    )
+                    target_check_html = gr.HTML(_init_tgt)
+                    realistic_time_state = gr.State(value=_init_realistic_s)
+                    with gr.Row(visible=_init_show_tgt_btns) as target_btn_row:
+                        keep_goal_btn     = gr.Button("Keep my original goal", variant="secondary", size="sm")
+                        use_realistic_btn = gr.Button("✓ Update to realistic target", variant="primary", size="sm")
                     edit_btn = gr.Button("✏️  Edit profile & regenerate plan",
                                          variant="secondary", size="sm")
 
@@ -1512,6 +1844,16 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         marathon_date_in = gr.Textbox(label="Race date (DD-MM-YYYY)",
                                                       value=_iso_to_dmy(_prof.get("marathon_date", "")),
                                                       placeholder="11-04-2027")
+                    with gr.Row():
+                        hr_rest_setup_in = gr.Number(
+                            label="Resting heart rate (bpm)",
+                            precision=0, minimum=30, maximum=100,
+                            value=_startup.get("hr_rest", 50),
+                            info="Morning resting HR — used for Karvonen HR zones",
+                            scale=1,
+                        )
+                        with gr.Column(scale=3):
+                            pass
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Target finish time</div></div>')
                     with gr.Row():
@@ -1629,13 +1971,13 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                     gen_msg   = gr.Textbox(label="Status", interactive=False)
                     zones_out = gr.JSON(label="Training Zones")
 
-            # Panel 2 — Run History
+            # Panel 2 — Activity Log
             with gr.Group(visible=False, elem_id="panel-history") as panel_history:
                 gr.HTML("""
                     <div class="page-header">
                         <span class="page-header-icon">🏃</span>
                         <div>
-                            <div class="page-header-title">Run History</div>
+                            <div class="page-header-title">Activity Log</div>
                             <div class="page-header-sub">Upload .fit files · duplicates ignored · metrics: pace, HR, drift, cadence, elevation</div>
                         </div>
                     </div>
@@ -1670,14 +2012,27 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                             garmin_disconnect_btn = gr.Button("Disconnect", variant="stop", size="sm")
                         garmin_msg = gr.Textbox(label="Status", interactive=False)
 
-                gr.HTML('<div class="section-label"><div class="section-label-text">Run log</div></div>')
-                hist_df  = gr.Dataframe(label="", wrap=True)
+                gr.HTML('<div class="section-label"><div class="section-label-text">Activity log</div></div>')
+                hist_df_state   = gr.State()
+                hist_page_state = gr.State(value=0)
+                hist_html       = gr.HTML()
+                with gr.Row():
+                    hist_prev_btn  = gr.Button("← Previous", size="sm", variant="secondary")
+                    with gr.Column(scale=2):
+                        hist_page_info = gr.HTML(
+                            "<div style='text-align:center;padding:6px;font-size:12px;color:#9CA3AF'>—</div>",
+                        )
+                    hist_next_btn  = gr.Button("Next →", size="sm", variant="secondary")
 
                 _garmin_outputs = [garmin_status, garmin_form, garmin_mfa_group,
                                    garmin_synced_group, garmin_autosync_in, garmin_next_run_out]
 
-                hist_btn.click(process_history, inputs=hist_files, outputs=[hist_df, hist_msg])
-                hist_clear_btn.click(clear_history, outputs=[hist_df, hist_msg])
+                hist_btn.click(
+                    process_history, inputs=hist_files, outputs=[hist_df_state, hist_msg]
+                ).then(_hist_reset_page, inputs=[hist_df_state], outputs=[hist_html, hist_page_state, hist_page_info])
+                hist_clear_btn.click(
+                    clear_history, outputs=[hist_df_state, hist_msg]
+                ).then(_hist_reset_page, inputs=[hist_df_state], outputs=[hist_html, hist_page_state, hist_page_info])
                 garmin_conn_btn.click(
                     garmin_connect_ui,
                     inputs=[garmin_email_in, garmin_pass_in],
@@ -1692,12 +2047,27 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                     garmin_disconnect_ui,
                     outputs=_garmin_outputs + [garmin_msg],
                 )
-                garmin_import_btn.click(garmin_import_ui, outputs=[hist_df, garmin_msg])
-                garmin_sync_btn.click(garmin_sync_new_ui, outputs=[hist_df, garmin_msg])
+                garmin_import_btn.click(
+                    garmin_import_ui, outputs=[hist_df_state, garmin_msg]
+                ).then(_hist_reset_page, inputs=[hist_df_state], outputs=[hist_html, hist_page_state, hist_page_info])
+                garmin_sync_btn.click(
+                    garmin_sync_new_ui, outputs=[hist_df_state, garmin_msg]
+                ).then(_hist_reset_page, inputs=[hist_df_state], outputs=[hist_html, hist_page_state, hist_page_info])
                 garmin_autosync_in.change(
                     garmin_autosync_toggle,
                     inputs=[garmin_autosync_in],
                     outputs=[garmin_next_run_out, garmin_msg],
+                )
+
+                hist_prev_btn.click(
+                    _hist_prev_page,
+                    inputs=[hist_df_state, hist_page_state],
+                    outputs=[hist_html, hist_page_state, hist_page_info],
+                )
+                hist_next_btn.click(
+                    _hist_next_page,
+                    inputs=[hist_df_state, hist_page_state],
+                    outputs=[hist_html, hist_page_state, hist_page_info],
                 )
 
             # Panel 3 — Adjustments
@@ -1787,9 +2157,39 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                     outputs=[checkin_json, coaching_out, checkin_plan_out],
                 )
 
+            # Panel 5 — My Zones
+            with gr.Group(visible=False, elem_id="panel-zones") as panel_zones:
+                gr.HTML("""
+                    <div class="page-header">
+                        <span class="page-header-icon">📊</span>
+                        <div>
+                            <div class="page-header-title">My Zones</div>
+                            <div class="page-header-sub">Pace targets for every workout type · Heart rate zones</div>
+                        </div>
+                    </div>
+                """)
+                zones_vdot_header = gr.HTML()
+                with gr.Row():
+                    hr_max_in = gr.Number(
+                        label="Max heart rate (bpm)",
+                        precision=0, minimum=130, maximum=230, value=177,
+                        info="Highest HR reached in a max effort",
+                        scale=1,
+                    )
+                    hr_rest_in = gr.Number(
+                        label="Resting heart rate (bpm)",
+                        precision=0, minimum=30, maximum=100, value=50,
+                        info="Morning resting HR · used for Karvonen zones",
+                        scale=1,
+                    )
+                gr.HTML('<div class="section-label"><div class="section-label-text">Pace zones</div></div>')
+                zones_pace_out = gr.HTML()
+                gr.HTML('<div class="section-label"><div class="section-label-text">Heart rate zones</div></div>')
+                zones_hr_out = gr.HTML()
+
     # ── Nav button wiring ──────────────────────────────────────────────────
-    _panels = [panel_plan, panel_setup, panel_history, panel_adj, panel_checkin]
-    _btns   = [btn_plan, btn_setup, btn_hist, btn_adj, btn_checkin]
+    _panels = [panel_plan, panel_setup, panel_history, panel_adj, panel_checkin, panel_zones]
+    _btns   = [btn_plan, btn_setup, btn_hist, btn_adj, btn_checkin, btn_zones]
 
     for _i, _btn in enumerate(_btns):
         _btn.click(_nav_handler(_i), outputs=_panels + _btns)
@@ -1840,9 +2240,29 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
     def _generate_and_show_summary(*args):
         result = compute_and_generate(*args)
         zones_out_val, plan_html, msg, summary_html = result
+        err = isinstance(zones_out_val, dict) and "error" in zones_out_val
+        tgt_html, show_btns, realistic_s = ("", False, None)
+        if not err:
+            s = state_mod.load()
+            tgt_html, show_btns, realistic_s = _target_assessment(
+                s.get("profile", {}), s.get("zones", {}), s.get("plan", [])
+            )
         return (zones_out_val, plan_html, msg, summary_html,
-                gr.update(visible=True), gr.update(visible=False),
+                gr.update(visible=not err), gr.update(visible=err),
+                tgt_html, gr.update(visible=show_btns), realistic_s,
                 load_status_on_start())
+
+    def _apply_realistic_target(realistic_s):
+        if not realistic_s:
+            return 0, 0, 0, gr.update(visible=False), ""
+        h, r = divmod(int(realistic_s), 3600)
+        m, sec = divmod(r, 60)
+        confirm = ("<div style='color:#059669;font-size:13px;padding:8px 0'>"
+                   f"✓ Goal updated to {h}:{m:02d}:{sec:02d} — "
+                   "click <b>Save &amp; Generate Plan</b> to rebuild your plan.</div>")
+        return h, m, sec, gr.update(visible=False), confirm
+
+    plan_phase_radio.change(render_plan_phase, inputs=[plan_phase_radio], outputs=[plan_df])
 
     gen_btn.click(
         _generate_and_show_summary,
@@ -1859,15 +2279,35 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
             lrp3_day_in, lrp3_km_in, lrp3_type_in, lrp3_visible_state,
             lrp4_day_in, lrp4_km_in, lrp4_type_in, lrp4_visible_state,
             strength_in, cycling_in,
+            hr_rest_setup_in,
         ],
         outputs=[zones_out, plan_df, gen_msg, profile_summary_html,
-                 setup_summary, setup_form, status_bar],
+                 setup_summary, setup_form,
+                 target_check_html, target_btn_row, realistic_time_state,
+                 status_bar],
     )
+
+    keep_goal_btn.click(lambda: gr.update(visible=False), outputs=[target_btn_row])
+    use_realistic_btn.click(
+        _apply_realistic_target,
+        inputs=[realistic_time_state],
+        outputs=[goal_h, goal_m, goal_s, target_btn_row, target_check_html],
+    )
+
+    # ── My Zones: nav click loads data, HRmax change updates HR zones ────────
+    btn_zones.click(
+        load_zones_tab,
+        outputs=[zones_vdot_header, hr_max_in, hr_rest_in, zones_pace_out, zones_hr_out],
+    )
+    hr_max_in.change(update_zones_hr, inputs=[hr_max_in, hr_rest_in], outputs=[zones_hr_out])
+    hr_rest_in.change(update_zones_hr, inputs=[hr_max_in, hr_rest_in], outputs=[zones_hr_out])
 
     # ── Load saved data on page open ──────────────────────────────────────
     demo.load(load_status_on_start,  outputs=status_bar)
     demo.load(load_plan_on_start,    outputs=plan_df)
-    demo.load(load_history_on_start, outputs=hist_df)
+    demo.load(load_history_on_start, outputs=hist_df_state).then(
+        _hist_reset_page, inputs=[hist_df_state], outputs=[hist_html, hist_page_state, hist_page_info]
+    )
     demo.load(load_garmin_ui,        outputs=_garmin_outputs)
 
 
