@@ -50,10 +50,30 @@ _b2_dist_saved = _prof.get("b2_dist", "10 km")
 _b2_h, _b2_m, _b2_s = _time_parts(_prof.get("b2_time_s", 2850))
 
 _saved_run_days = [WEEKDAY_LABELS[i] for i in _sched.get("run_days", [1, 3, 4, 5, 6])]
-_saved_lrp_day  = (WEEKDAY_LABELS[_sched["lrp_day"]]
-                   if _sched.get("lrp_day") is not None else "None")
 _saved_strength = [WEEKDAY_LABELS[i] for i in _sched.get("strength_days", [])]
 _saved_cycling  = [WEEKDAY_LABELS[i] for i in _sched.get("cycling_days", [])]
+
+# Migrate old single lrp_day/km/type → new lrp_sessions list
+def _load_lrp_sessions(sched: dict) -> list:
+    if sched.get("lrp_sessions"):
+        return sched["lrp_sessions"]
+    # Legacy single-session state
+    if sched.get("lrp_day") is not None:
+        return [{"day": sched["lrp_day"], "km": sched.get("lrp_km", 12.0),
+                 "type": sched.get("lrp_type", "easy")}]
+    return [{"day": None, "km": 12.0, "type": "easy"}]
+
+_saved_lrp_sessions = _load_lrp_sessions(_sched)
+_lrp1 = _saved_lrp_sessions[0] if len(_saved_lrp_sessions) > 0 else {}
+_lrp2 = _saved_lrp_sessions[1] if len(_saved_lrp_sessions) > 1 else {}
+
+_lrp1_day  = WEEKDAY_LABELS[_lrp1["day"]] if _lrp1.get("day") is not None else "None"
+_lrp1_km   = _lrp1.get("km", 12.0)
+_lrp1_type = _lrp1.get("type", "easy")
+_lrp2_day  = WEEKDAY_LABELS[_lrp2["day"]] if _lrp2.get("day") is not None else "None"
+_lrp2_km   = _lrp2.get("km", 10.0)
+_lrp2_type = _lrp2.get("type", "easy")
+_has_lrp2  = bool(_lrp2.get("day") is not None)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -87,11 +107,109 @@ def _plan_to_df(plan: list) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
-# ── Startup loaders (called by demo.load) ─────────────────────────────────
+_PHASE_CONFIG = {
+    "Base":  {"accent": "#059669", "badge_bg": "#DCFCE7", "badge_text": "#166534"},
+    "Build": {"accent": "#2563EB", "badge_bg": "#DBEAFE", "badge_text": "#1E40AF"},
+    "Peak":  {"accent": "#EA580C", "badge_bg": "#FFEDD5", "badge_text": "#9A3412"},
+    "Taper": {"accent": "#64748B", "badge_bg": "#F1F5F9", "badge_text": "#475569"},
+}
+
+_SESSION_COLOR = {
+    "Easy":          "#10B981",
+    "Recovery":      "#34D399",
+    "Long":          "#2563EB",
+    "Tempo":         "#F5871F",
+    "SVC Intervals": "#DC2626",
+    "Marathon Pace": "#7C3AED",
+    "Rest":          "#9CA3AF",
+    "Strength":      "#D97706",
+    "Cycling":       "#0891B2",
+    "LRP Easy":      "#0D9488",
+    "LRP Tempo":     "#EA580C",
+    "LRP Long":      "#1D4ED8",
+}
+
+
+def _plan_to_html(plan: list) -> str:
+    if not plan:
+        return (
+            "<div style='text-align:center;padding:56px 0;color:#9CA3AF;"
+            "font-family:-apple-system,sans-serif'>"
+            "<div style='font-size:44px;margin-bottom:12px'>🏃</div>"
+            "<div style='font-size:15px;font-weight:600;color:#374151'>No plan yet</div>"
+            "<div style='font-size:13px;margin-top:6px'>Go to Setup & Plan to generate your training plan.</div>"
+            "</div>"
+        )
+
+    rows_html = ""
+    prev_week = None
+    row_idx = 0
+
+    for w in plan:
+        phase = w["phase"]
+        cfg = _PHASE_CONFIG.get(phase, {"accent": "#64748B", "badge_bg": "#F1F5F9", "badge_text": "#475569"})
+        for d in w["days"]:
+            wk_num = w["week_num"]
+            day    = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][d["weekday"]]
+            sess   = d["session_type"]
+            badge_color = _SESSION_COLOR.get(sess, "#6B7280")
+            km     = f"{d['distance_km']:.0f} km" if d.get("distance_km") else "—"
+            desc   = d["description"]
+            targets = " · ".join(f"{k}: {v}" for k, v in d.get("targets", {}).items()) or "—"
+            week_sep = "border-top:2px solid #E5E7EB;" if wk_num != prev_week else ""
+            prev_week = wk_num
+            row_bg = "#ffffff" if row_idx % 2 == 0 else "#FAFAFA"
+            row_idx += 1
+            rows_html += (
+                f"<tr style='background:{row_bg};{week_sep}'>"
+                f"<td style='padding:9px 12px;font-weight:700;color:#1B2874;"
+                f"border-left:3px solid {cfg['accent']};white-space:nowrap'>{wk_num}</td>"
+                f"<td style='padding:9px 10px;white-space:nowrap'>"
+                f"<span style='background:{cfg['badge_bg']};color:{cfg['badge_text']};"
+                f"padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600'>{phase}</span></td>"
+                f"<td style='padding:9px 10px;color:#9CA3AF;font-size:12px;white-space:nowrap'>{d['date']}</td>"
+                f"<td style='padding:9px 10px;font-weight:600;color:#374151;white-space:nowrap'>{day}</td>"
+                f"<td style='padding:9px 10px;white-space:nowrap'>"
+                f"<span style='background:{badge_color};color:#fff;padding:2px 9px;"
+                f"border-radius:99px;font-size:11px;font-weight:700'>{sess}</span></td>"
+                f"<td style='padding:9px 10px;color:#374151;font-size:13px'>{desc}</td>"
+                f"<td style='padding:9px 10px;text-align:center;font-weight:700;"
+                f"color:#1B2874;white-space:nowrap'>{km}</td>"
+                f"<td style='padding:9px 10px;color:#9CA3AF;font-size:12px'>{targets}</td>"
+                f"</tr>"
+            )
+
+    _th = ("padding:12px 10px;text-align:left;font-weight:600;"
+           "font-size:11px;letter-spacing:0.05em;text-transform:uppercase;color:#fff")
+    return (
+        "<div style='overflow-x:auto;border-radius:12px;"
+        "border:1px solid #F5871F;"
+        "box-shadow:0 2px 8px rgba(0,0,0,0.06);"
+        "font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif'>"
+        "<table style='width:100%;border-collapse:collapse;font-size:13px'>"
+        "<thead>"
+        f"<tr style='background:#F5871F'>"
+        f"<th style='{_th};white-space:nowrap;padding-left:12px'>Wk</th>"
+        f"<th style='{_th}'>Phase</th>"
+        f"<th style='{_th}'>Date</th>"
+        f"<th style='{_th}'>Day</th>"
+        f"<th style='{_th}'>Session</th>"
+        f"<th style='{_th}'>Details</th>"
+        f"<th style='{_th};text-align:center'>Km</th>"
+        f"<th style='{_th}'>Targets</th>"
+        "</tr>"
+        "</thead>"
+        f"<tbody>{rows_html}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
+# ── Startup loaders ────────────────────────────────────────────────────────
 
 def load_plan_on_start():
     plan = state_mod.load().get("plan", [])
-    return _plan_to_df(plan)
+    return _plan_to_html(plan)
 
 
 def load_history_on_start():
@@ -104,16 +222,91 @@ def load_status_on_start():
     parts = []
     if s.get("profile", {}).get("goal_race"):
         p = s["profile"]
-        parts.append(f"Goal: **{p['goal_race']}** on {p.get('marathon_date','?')}  |  "
-                     f"target {_fmt_duration(p.get('goal_time_s',0))}")
+        parts.append(
+            f"<b>Goal:</b> {p['goal_race']} on {p.get('marathon_date','?')}"
+            f"&nbsp; | &nbsp;target {_fmt_duration(p.get('goal_time_s', 0))}"
+        )
     if s.get("plan"):
-        parts.append(f"Plan: **{len(s['plan'])} weeks** saved")
+        parts.append(f"<b>Plan:</b> {len(s['plan'])} weeks saved")
     if s.get("history"):
-        parts.append(f"History: **{len(s['history'])} runs** saved")
-    return " · ".join(parts) if parts else "No saved data yet — fill in Setup & Plan to get started."
+        parts.append(f"<b>History:</b> {len(s['history'])} runs saved")
+    text = " &nbsp;·&nbsp; ".join(parts) if parts else "No saved data yet — fill in Setup &amp; Plan to get started."
+    return (
+        "<div style='background:#1B2874;border-radius:8px;padding:9px 16px;"
+        "color:#ffffff;font-size:13px;"
+        "font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;line-height:1.4'>"
+        + text + "</div>"
+    )
 
 
 # ── Tab 1: Setup & plan generation ────────────────────────────────────────
+
+def _parse_lrp_sessions(
+    lrp1_day, lrp1_km, lrp1_type,
+    lrp2_day, lrp2_km, lrp2_type, lrp2_visible,
+) -> list:
+    sessions = []
+    d1 = WEEKDAY_MAP.get(lrp1_day) if lrp1_day and lrp1_day != "None" else None
+    if d1 is not None:
+        sessions.append({"day": d1, "km": float(lrp1_km or 12), "type": lrp1_type or "easy"})
+    if lrp2_visible:
+        d2 = WEEKDAY_MAP.get(lrp2_day) if lrp2_day and lrp2_day != "None" else None
+        if d2 is not None:
+            sessions.append({"day": d2, "km": float(lrp2_km or 10), "type": lrp2_type or "easy"})
+    return sessions
+
+
+def _profile_summary_html(profile: dict, schedule: dict, zones_data: dict) -> str:
+    if not profile:
+        return ""
+    p = profile
+    s = schedule
+    run_days = ", ".join(WEEKDAY_LABELS[i][:3] for i in s.get("run_days", []))
+    lrp_sessions = _load_lrp_sessions(s)
+    lrp_rows = "".join(
+        f"<div style='display:flex;gap:8px;margin-bottom:4px'>"
+        f"<span style='background:#EFF6FF;color:#1D4ED8;padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600'>"
+        f"{WEEKDAY_LABELS[sess['day']][:3]}</span>"
+        f"<span style='color:#374151;font-size:13px'>{sess['km']:.0f} km · {sess['type']}</span>"
+        f"</div>"
+        for sess in lrp_sessions if sess.get("day") is not None
+    ) or "<span style='color:#9CA3AF;font-size:13px'>No club session configured</span>"
+
+    strength_days = ", ".join(WEEKDAY_LABELS[i][:3] for i in s.get("strength_days", [])) or "—"
+    cycling_days  = ", ".join(WEEKDAY_LABELS[i][:3] for i in s.get("cycling_days", []))  or "—"
+    injury = p.get("injury_level", "none")
+    injury_badge_color = {"none": "#10B981", "light": "#F5871F", "moderate": "#DC2626"}.get(injury, "#6B7280")
+
+    vdot = zones_data.get("vdot", "—") if zones_data else "—"
+
+    def row(label, value):
+        return (f"<div style='display:flex;justify-content:space-between;padding:8px 0;"
+                f"border-bottom:1px solid #F3F4F6'>"
+                f"<span style='color:#6B7280;font-size:13px'>{label}</span>"
+                f"<span style='color:#111827;font-size:13px;font-weight:500'>{value}</span>"
+                f"</div>")
+
+    inj_badge = (
+        "<span style='background:" + injury_badge_color
+        + ";color:white;padding:1px 8px;border-radius:99px;font-size:11px'>"
+        + injury + "</span>"
+    )
+    return (
+        "<div style='font-family:-apple-system,sans-serif;padding:0 4px'>"
+        + row("Goal race",   p.get("goal_race", "—"))
+        + row("Race date",   p.get("marathon_date", "—"))
+        + row("Target time", _fmt_duration(p.get("goal_time_s", 0)))
+        + row("VDOT",        str(vdot))
+        + row("Injury level", inj_badge)
+        + row("Running days", run_days or "—")
+        + row("Strength",    strength_days)
+        + row("Cycling",     cycling_days)
+        + "<div style='padding:8px 0'>"
+          "<div style='color:#6B7280;font-size:13px;margin-bottom:6px'>LRP club sessions</div>"
+        + lrp_rows
+        + "</div></div>"
+    )
+
 
 def compute_and_generate(
     name, goal_race, marathon_date_str,
@@ -121,22 +314,24 @@ def compute_and_generate(
     b1_dist, b1_h, b1_m, b1_s,
     b2_dist, b2_h, b2_m, b2_s,
     injury_level, injury_notes,
-    run_days_labels, lrp_day_label, lrp_km, lrp_type,
+    run_days_labels,
+    lrp1_day, lrp1_km, lrp1_type,
+    lrp2_day, lrp2_km, lrp2_type, lrp2_visible,
     strength_labels, cycling_labels,
 ):
     goal_total = _parse_time(goal_h, goal_m, goal_s)
     if not goal_total:
-        return {"error": "Invalid goal time"}, None, "Fix errors above."
+        return {"error": "Invalid goal time"}, None, "Fix errors above.", ""
 
     try:
         marathon_date = datetime.strptime(marathon_date_str, "%Y-%m-%d").date()
     except Exception:
-        return {"error": "Invalid date — use YYYY-MM-DD"}, None, "Fix errors above."
+        return {"error": "Invalid date — use YYYY-MM-DD"}, None, "Fix errors above.", ""
 
     b1_time  = _parse_time(b1_h, b1_m, b1_s)
     b1_m_val = DISTANCES.get(b1_dist)
     if not b1_time or not b1_m_val:
-        return {"error": "Invalid benchmark 1"}, None, "Fix errors above."
+        return {"error": "Invalid benchmark 1"}, None, "Fix errors above.", ""
 
     vdot     = vdot_from_race(b1_m_val, b1_time)
     b2_time  = _parse_time(b2_h, b2_m, b2_s)
@@ -150,43 +345,45 @@ def compute_and_generate(
         cv        = cv_from_vdot(vdot)
         cv_source = "estimated from VDOT"
 
-    zones    = build_zones(vdot, cv)
-    run_days = sorted([WEEKDAY_MAP[d] for d in (run_days_labels or [])])
-    lrp_day  = WEEKDAY_MAP.get(lrp_day_label) if lrp_day_label and lrp_day_label != "None" else None
-    strength = [WEEKDAY_MAP[d] for d in (strength_labels or [])]
-    cycling  = [WEEKDAY_MAP[d] for d in (cycling_labels or [])]
+    zones        = build_zones(vdot, cv)
+    run_days     = sorted([WEEKDAY_MAP[d] for d in (run_days_labels or [])])
+    lrp_sessions = _parse_lrp_sessions(lrp1_day, lrp1_km, lrp1_type,
+                                        lrp2_day, lrp2_km, lrp2_type, lrp2_visible)
+    strength     = [WEEKDAY_MAP[d] for d in (strength_labels or [])]
+    cycling      = [WEEKDAY_MAP[d] for d in (cycling_labels or [])]
 
     plan = generate_plan(
         marathon_date=marathon_date,
         goal_time_s=goal_total,
         zones=zones,
         run_days=run_days,
-        lrp_day=lrp_day,
-        lrp_km=float(lrp_km or 10),
-        lrp_type=lrp_type or "easy",
+        lrp_sessions=lrp_sessions,
         strength_days=strength,
         cycling_days=cycling,
         injury=injury_level,
     )
 
+    new_profile = {
+        "name": name, "goal_race": goal_race,
+        "marathon_date": str(marathon_date),
+        "goal_time_s": goal_total,
+        "injury_level": injury_level,
+        "injury_notes": injury_notes,
+        "b1_dist": b1_dist, "b1_time_s": b1_time,
+        "b2_dist": b2_dist, "b2_time_s": b2_time or 0,
+    }
+    new_schedule = {
+        "run_days": run_days,
+        "lrp_sessions": lrp_sessions,
+        "strength_days": strength,
+        "cycling_days": cycling,
+    }
+
     existing = state_mod.load()
     existing.update({
-        "profile": {
-            "name": name, "goal_race": goal_race,
-            "marathon_date": str(marathon_date),
-            "goal_time_s": goal_total,
-            "injury_level": injury_level,
-            "injury_notes": injury_notes,
-            # Save benchmark inputs so form re-populates on next launch
-            "b1_dist": b1_dist, "b1_time_s": b1_time,
-            "b2_dist": b2_dist, "b2_time_s": b2_time or 0,
-        },
+        "profile": new_profile,
         "zones": zones.__dict__,
-        "schedule": {
-            "run_days": run_days, "lrp_day": lrp_day,
-            "lrp_km": float(lrp_km or 10), "lrp_type": lrp_type or "easy",
-            "strength_days": strength, "cycling_days": cycling,
-        },
+        "schedule": new_schedule,
         "plan": [
             {
                 "week_num": w.week_num, "phase": w.phase,
@@ -212,7 +409,8 @@ def compute_and_generate(
     msg = (f"Plan saved — {len(plan)} weeks to {goal_race}  |  "
            f"VDOT {zones.vdot}  |  SVC {zones.cv_mps * 3.6:.1f} km/h  |  "
            f"Target {_fmt_duration(goal_total)}")
-    return zs, _plan_to_df(existing["plan"]), msg
+    summary_html = _profile_summary_html(new_profile, new_schedule, zones.__dict__)
+    return zs, _plan_to_html(existing["plan"]), msg, summary_html
 
 
 # ── Tab 2: Run history ─────────────────────────────────────────────────────
@@ -417,201 +615,761 @@ def checkin(week_num, files, feeling, prev_hr_input):
     return assessment, note, _plan_to_df(state["plan"])
 
 
+# ── CSS ────────────────────────────────────────────────────────────────────
+
+CSS = """
+:root {
+    --lrp-navy:   #1B2874;
+    --lrp-blue:   #3B82F6;
+    --lrp-orange: #F5871F;
+    --lrp-bg:     #F0F2F8;
+    --lrp-white:  #FFFFFF;
+    --lrp-text:   #111827;
+
+    /* Fix: primary_hue bleeds into block label tabs — neutralise to grey */
+    --block-label-background-fill: #F3F4F6;
+    --block-label-text-color: #374151;
+    --block-title-background-fill: #F3F4F6;
+    --block-title-text-color: #374151;
+    --block-info-text-color: #6B7280;
+
+    /* Fix: Soft theme input focus defaults to indigo secondary */
+    --input-background-fill-focus: #EFF6FF;
+    --input-border-color-focus: #3B82F6;
+
+    /* Make ALL group/form containers white — eliminates nested grey cards */
+    --background-fill-primary: #ffffff;
+    --background-fill-secondary: #ffffff;
+    --panel-background-fill: #ffffff;
+
+    /* Add subtle border so form fields are visible on white background */
+    --block-border-width: 1px;
+    --block-border-color: #E5E7EB;
+    --block-shadow: 0 1px 3px rgba(0,0,0,0.04);
+
+    /* Clean JSON / code block backgrounds */
+    --code-background-fill: #F8FAFC;
+
+    /* Override dark-mode body-text-color that wins in theme cascade */
+    --body-text-color: #111827;
+    --body-text-color-subdued: #6B7280;
+}
+
+footer { display: none !important; }
+
+body, .gradio-container {
+    background: var(--lrp-bg) !important;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif !important;
+}
+
+/* ── App-level row: sidebar + content side by side ── */
+#app-layout {
+    gap: 0 !important;
+    align-items: stretch !important;
+    padding: 0 !important;
+    min-height: 100vh;
+    flex-wrap: nowrap !important;
+}
+
+/* ── Sidebar column ──────────────────────────────── */
+#sidebar {
+    background: var(--lrp-navy) !important;
+    min-width: 220px !important;
+    max-width: 220px !important;
+    flex-shrink: 0 !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    border-radius: 0 !important;
+    overflow: hidden;
+}
+
+#sidebar > .form,
+#sidebar > div,
+#sidebar > .gap {
+    padding: 0 !important;
+    gap: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Sidebar logo block */
+#sidebar-logo {
+    padding: 20px 16px 16px;
+    display: flex !important;
+    align-items: center;
+    gap: 11px;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+
+#sidebar-logo img {
+    width: 40px;
+    height: 40px;
+    border-radius: 9px;
+    flex-shrink: 0;
+    object-fit: cover;
+}
+
+.brand-name {
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+}
+
+.brand-sub {
+    color: rgba(255,255,255,0.48);
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-top: 1px;
+}
+
+/* ── Nav buttons ─────────────────────────────────── */
+.nav-btn {
+    display: block !important;
+    width: calc(100% - 16px) !important;
+    margin: 2px 8px !important;
+    text-align: left !important;
+    padding: 10px 14px !important;
+    border-radius: 8px !important;
+    border: none !important;
+    font-size: 13.5px !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: background 0.15s ease, color 0.15s ease !important;
+    box-shadow: none !important;
+    min-height: unset !important;
+}
+
+.nav-btn.secondary,
+.nav-btn.secondary:focus {
+    background: transparent !important;
+    color: rgba(255,255,255,0.70) !important;
+}
+
+.nav-btn.secondary:hover {
+    background: rgba(255,255,255,0.09) !important;
+    color: #ffffff !important;
+}
+
+.nav-btn.primary,
+.nav-btn.primary:focus {
+    background: var(--lrp-orange) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    border-color: transparent !important;
+}
+
+.nav-btn.primary:hover {
+    background: #df7318 !important;
+}
+
+/* First nav button: add top margin for breathing room */
+#nav-plan { margin-top: 12px !important; }
+
+/* ── Strip Group / Row container wrappers — no grey cards ───────── */
+#panel-setup .form, #panel-setup .gap,
+#panel-history .form, #panel-history .gap,
+#panel-adj .form, #panel-adj .gap,
+#panel-checkin .form, #panel-checkin .gap {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+/* Form-field blocks — subtle white card (non-table panels) */
+#panel-setup .block,
+#panel-history .block:not(.gradio-dataframe),
+#panel-adj .block:not(.gradio-dataframe),
+#panel-checkin .block:not(.gradio-dataframe) {
+    background: white !important;
+    border: 1px solid #E5E7EB !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
+    border-radius: var(--block-radius) !important;
+}
+
+/* Dataframe outer block — let the table-wrap carry the border */
+#panel-history .gradio-dataframe,
+#panel-adj .gradio-dataframe,
+#panel-checkin .gradio-dataframe {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+/* ── ALL gr.Dataframe tables: orange header, white rows ──────────── */
+#panel-history .table-wrap,
+#panel-adj .table-wrap,
+#panel-checkin .table-wrap {
+    border-radius: 12px;
+    border: 1px solid #F5871F !important;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+#panel-history table,
+#panel-adj table,
+#panel-checkin table {
+    background: white !important;
+    border-collapse: collapse !important;
+    width: 100% !important;
+    font-size: 13px !important;
+}
+
+/* Header: orange background, white text */
+#panel-history thead th,
+#panel-adj thead th,
+#panel-checkin thead th {
+    background: #F5871F !important;
+    color: white !important;
+    font-weight: 600 !important;
+    font-size: 11px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    padding: 12px 10px !important;
+    border: none !important;
+    text-align: left !important;
+}
+
+/* Odd rows: white */
+#panel-history tbody tr:nth-child(odd),
+#panel-adj tbody tr:nth-child(odd),
+#panel-checkin tbody tr:nth-child(odd) {
+    background: white !important;
+}
+
+/* Even rows: very light grey */
+#panel-history tbody tr:nth-child(even),
+#panel-adj tbody tr:nth-child(even),
+#panel-checkin tbody tr:nth-child(even) {
+    background: #FAFAFA !important;
+}
+
+/* Row separator */
+#panel-history tbody tr,
+#panel-adj tbody tr,
+#panel-checkin tbody tr {
+    border-bottom: 1px solid #F3F4F6 !important;
+}
+
+/* Cells: dark readable text, no extra background */
+#panel-history tbody td,
+#panel-adj tbody td,
+#panel-checkin tbody td {
+    color: #374151 !important;
+    padding: 9px 10px !important;
+    font-size: 13px !important;
+    background: transparent !important;
+    border: none !important;
+}
+
+/* ── File upload drop zone — ALL text LRP blue ───────────────────── */
+/* Targets "Drop File(s) Here", "-or-", and "Click to Upload" */
+#content-area .file-preview-holder,
+#content-area .file-preview-holder *,
+#content-area .upload-container,
+#content-area .upload-container *,
+#content-area .empty p,
+#content-area .empty span,
+#content-area .grey {
+    color: var(--lrp-blue) !important;
+}
+
+/* Upload button inside the drop zone */
+#content-area .empty button,
+#content-area .upload-container button {
+    color: var(--lrp-blue) !important;
+    background: transparent !important;
+    border: 1px solid var(--lrp-blue) !important;
+}
+
+/* ── Content area ────────────────────────────────── */
+#content-area {
+    flex: 1 1 0% !important;
+    min-width: 0 !important;
+    padding: 28px 32px !important;
+    background: var(--lrp-bg) !important;
+    border-radius: 0 !important;
+    overflow-y: auto;
+}
+
+#content-area > .form,
+#content-area > div,
+#content-area > .gap {
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* ── Status bar ──────────────────────────────────── */
+#status-bar { margin-bottom: 8px !important; }
+
+/* Strip the gr.HTML block wrapper so the navy div sits flush */
+#status-bar .block {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+/* ── Panel containers — white cards ─────────────── */
+#panel-plan, #panel-setup, #panel-history,
+#panel-adj, #panel-checkin {
+    background: #ffffff !important;
+    border-radius: 14px !important;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.04) !important;
+    border: 1px solid rgba(0,0,0,0.05) !important;
+    padding: 0 0 28px 0 !important;
+    gap: 0 !important;
+    overflow: hidden;
+}
+
+/* Inner wrappers */
+#panel-plan > div, #panel-setup > div,
+#panel-history > div, #panel-adj > div, #panel-checkin > div {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 28px !important;
+    gap: 12px !important;
+}
+
+/* ── Page headers — clean modern style ───────────── */
+.page-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 22px 0 18px 0;
+    border-bottom: 1px solid #F3F4F6;
+    margin-bottom: 24px;
+    position: relative;
+}
+
+.page-header::before {
+    content: '';
+    display: block;
+    width: 4px;
+    min-height: 42px;
+    background: linear-gradient(180deg, #1B2874 0%, #3B82F6 100%);
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.page-header-icon {
+    font-size: 22px;
+    line-height: 1;
+}
+
+.page-header-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #1B2874;
+    line-height: 1.2;
+}
+
+.page-header-sub {
+    font-size: 12px;
+    color: #9CA3AF;
+    margin-top: 3px;
+    font-weight: 400;
+}
+
+/* ── Orange-accent section dividers ─────────────── */
+.section-label {
+    border-left: 3px solid var(--lrp-orange);
+    padding: 5px 0 5px 12px;
+    margin: 22px 0 10px;
+}
+
+.section-label-text {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--lrp-navy);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.section-label-sub {
+    font-size: 12px;
+    color: #9CA3AF;
+    margin-top: 2px;
+}
+
+/* Block label text (catches the "FIT files" tab label) */
+#content-area .block > span:first-child,
+#content-area .block .block-info {
+    color: #374151 !important;
+}
+
+/* ── Prose inside panels — keep it readable ──────── */
+#content-area .prose p {
+    color: #374151 !important;
+    font-size: 13px !important;
+    margin: 0 0 8px 0 !important;
+}
+
+/* ── Primary action buttons (in content) ─────────── */
+#content-area button.lg.primary,
+#content-area button.primary {
+    background: var(--lrp-orange) !important;
+    border-color: var(--lrp-orange) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+}
+
+#content-area button.lg.primary:hover,
+#content-area button.primary:hover {
+    background: #df7318 !important;
+    border-color: #df7318 !important;
+}
+
+#content-area button.stop {
+    background: #DC2626 !important;
+    border-color: #DC2626 !important;
+    color: #ffffff !important;
+}
+"""
+
 # ── UI ─────────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="LRP Coach", theme=gr.themes.Soft()) as demo:
-    gr.Markdown(
-        "# LRP Coach — Marathon Training Assistant\n"
-        "Daniels VDOT + Critical Velocity plan · weekly FIT-based adaptation · local AI coaching"
+_NAV_COUNT = 5
+
+def _nav_handler(active_i):
+    """Return a click handler that shows panel[active_i] and highlights its button."""
+    def handler():
+        panels  = [gr.update(visible=(i == active_i)) for i in range(_NAV_COUNT)]
+        buttons = [gr.update(variant=("primary" if i == active_i else "secondary"))
+                   for i in range(_NAV_COUNT)]
+        return panels + buttons
+    return handler
+
+
+_theme = gr.themes.Soft(
+    primary_hue=gr.themes.Color(
+        c50="#FFF7ED", c100="#FFEDD5", c200="#FED7AA",
+        c300="#FDBA74", c400="#FB923C", c500="#F5871F",
+        c600="#EA7615", c700="#C2620F", c800="#9A4D0B",
+        c900="#7C3D08", c950="#431D03",
+    ),
+    neutral_hue=gr.themes.Color(
+        c50="#F8FAFC", c100="#F1F5F9", c200="#E2E8F0",
+        c300="#CBD5E1", c400="#94A3B8", c500="#64748B",
+        c600="#475569", c700="#334155", c800="#1E293B",
+        c900="#0F172A", c950="#020617",
+    ),
+)
+
+with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
+
+    with gr.Row(elem_id="app-layout", equal_height=True):
+
+        # ── Sidebar ───────────────────────────────────────────────────────
+        with gr.Column(scale=1, min_width=220, elem_id="sidebar"):
+            gr.HTML("""
+                <div id="sidebar-logo">
+                    <img src="/file=scripts/lrp_icon.png" alt="LRP">
+                    <div>
+                        <div class="brand-name">LRP Coach</div>
+                        <div class="brand-sub">Marathon Training</div>
+                    </div>
+                </div>
+            """)
+            btn_plan    = gr.Button("📋  My Plan",          variant="primary",   elem_classes="nav-btn", elem_id="nav-plan")
+            btn_setup   = gr.Button("⚙️  Setup & Plan",     variant="secondary", elem_classes="nav-btn")
+            btn_hist    = gr.Button("🏃  Run History",      variant="secondary", elem_classes="nav-btn")
+            btn_adj     = gr.Button("✏️  Adjustments",      variant="secondary", elem_classes="nav-btn")
+            btn_checkin = gr.Button("✅  Weekly Check-in",  variant="secondary", elem_classes="nav-btn")
+
+        # ── Content area ──────────────────────────────────────────────────
+        with gr.Column(scale=5, elem_id="content-area"):
+            status_bar = gr.HTML("", elem_id="status-bar")
+
+            # Panel 0 — My Plan (default)
+            with gr.Group(visible=True, elem_id="panel-plan") as panel_plan:
+                gr.HTML("""
+                    <div class="page-header">
+                        <span class="page-header-icon">📋</span>
+                        <div>
+                            <div class="page-header-title">My Plan</div>
+                            <div class="page-header-sub">Loads automatically · updates after every check-in or adjustment</div>
+                        </div>
+                    </div>
+                """)
+                plan_df = gr.HTML()
+
+            # Panel 1 — Setup & Plan
+            with gr.Group(visible=False, elem_id="panel-setup") as panel_setup:
+                gr.HTML("""
+                    <div class="page-header">
+                        <span class="page-header-icon">⚙️</span>
+                        <div>
+                            <div class="page-header-title">Setup & Plan</div>
+                            <div class="page-header-sub">Your profile · edit to update and regenerate</div>
+                        </div>
+                    </div>
+                """)
+
+                # ── Static summary view (shown when plan exists) ──────────
+                _init_summary = _profile_summary_html(
+                    _prof, _sched, _saved.get("zones", {})
+                ) if _has_plan else ""
+
+                with gr.Group(visible=_has_plan, elem_id="setup-summary") as setup_summary:
+                    profile_summary_html = gr.HTML(_init_summary)
+                    edit_btn = gr.Button("✏️  Edit profile & regenerate plan",
+                                         variant="secondary", size="sm")
+
+                # ── Edit form (shown when no plan, or after Edit clicked) ──
+                with gr.Group(visible=not _has_plan, elem_id="setup-form") as setup_form:
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Profile & Goals</div></div>')
+                    with gr.Row():
+                        name_in          = gr.Textbox(label="Your name", value=_prof.get("name", "Cecilia"))
+                        goal_race_in     = gr.Textbox(label="Target race", value=_prof.get("goal_race", ""),
+                                                      placeholder="Paris Marathon 2027")
+                        marathon_date_in = gr.Textbox(label="Race date (YYYY-MM-DD)",
+                                                      value=_prof.get("marathon_date", ""),
+                                                      placeholder="2027-04-11")
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Target finish time</div></div>')
+                    with gr.Row():
+                        goal_h = gr.Number(label="Hours",   value=_g_h, precision=0, minimum=2, maximum=7)
+                        goal_m = gr.Number(label="Minutes", value=_g_m, precision=0, minimum=0, maximum=59)
+                        goal_s = gr.Number(label="Seconds", value=_g_s, precision=0, minimum=0, maximum=59)
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Benchmark 1 — required</div><div class="section-label-sub">Recent race or time trial</div></div>')
+                    with gr.Row():
+                        b1_dist = gr.Dropdown(DIST_KEYS, label="Distance", value=_b1_dist_saved)
+                        b1_h    = gr.Number(label="h",   value=_b1_h, precision=0, minimum=0, maximum=5)
+                        b1_m    = gr.Number(label="min", value=_b1_m, precision=0, minimum=0, maximum=59)
+                        b1_s    = gr.Number(label="sec", value=_b1_s, precision=0, minimum=0, maximum=59)
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Benchmark 2 — optional</div><div class="section-label-sub">Different distance → exact SVC via Monod-Billat. Leave zero if only one result.</div></div>')
+                    with gr.Row():
+                        b2_dist = gr.Dropdown(DIST_KEYS, label="Distance", value=_b2_dist_saved)
+                        b2_h    = gr.Number(label="h",   value=_b2_h, precision=0, minimum=0, maximum=5)
+                        b2_m    = gr.Number(label="min", value=_b2_m, precision=0, minimum=0, maximum=59)
+                        b2_s    = gr.Number(label="sec", value=_b2_s, precision=0, minimum=0, maximum=59)
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Physical status</div></div>')
+                    with gr.Row():
+                        injury_in       = gr.Radio(
+                            ["none", "light", "moderate"], label="Rehab / injury level",
+                            value=_prof.get("injury_level", "none"),
+                            info="none = full training  ·  light = reduced intensity  ·  moderate = significant restriction",
+                        )
+                        injury_notes_in = gr.Textbox(label="Notes", value=_prof.get("injury_notes", ""), lines=2)
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Weekly running days</div></div>')
+                    run_days_in = gr.CheckboxGroup(
+                        WEEKDAY_LABELS, label="",
+                        value=_saved_run_days,
+                    )
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">LRP club sessions</div><div class="section-label-sub">Locked into the plan · add up to 2</div></div>')
+
+                    # Session 1 (always shown)
+                    with gr.Row():
+                        lrp1_day_in  = gr.Dropdown(["None"] + WEEKDAY_LABELS, label="Session 1 — day",
+                                                    value=_lrp1_day)
+                        lrp1_km_in   = gr.Number(label="km", value=_lrp1_km, minimum=3, maximum=35)
+                        lrp1_type_in = gr.Radio(["easy", "tempo", "long"], label="Type",
+                                                 value=_lrp1_type)
+
+                    # Session 2 (toggle)
+                    lrp2_visible_state = gr.State(value=_has_lrp2)
+                    with gr.Group(visible=_has_lrp2, elem_id="lrp-session2") as lrp2_group:
+                        with gr.Row():
+                            lrp2_day_in  = gr.Dropdown(["None"] + WEEKDAY_LABELS, label="Session 2 — day",
+                                                        value=_lrp2_day)
+                            lrp2_km_in   = gr.Number(label="km", value=_lrp2_km, minimum=3, maximum=35)
+                            lrp2_type_in = gr.Radio(["easy", "tempo", "long"], label="Type",
+                                                     value=_lrp2_type)
+                        remove_lrp2_btn = gr.Button("✕ Remove session 2", size="sm", variant="secondary")
+
+                    add_lrp2_btn = gr.Button("+ Add second club session", size="sm",
+                                              variant="secondary", visible=not _has_lrp2,
+                                              elem_id="add-lrp2-btn")
+
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Cross-training</div></div>')
+                    with gr.Row():
+                        strength_in = gr.CheckboxGroup(WEEKDAY_LABELS, label="Strength days",
+                                                        value=_saved_strength)
+                        cycling_in  = gr.CheckboxGroup(WEEKDAY_LABELS, label="Cycling / Zwift days",
+                                                        value=_saved_cycling)
+
+                    with gr.Row():
+                        cancel_edit_btn = gr.Button("Cancel",
+                                                     variant="secondary", visible=_has_plan)
+                        gen_btn = gr.Button("Save & Generate Plan", variant="primary", size="lg")
+                    gen_msg   = gr.Textbox(label="Status", interactive=False)
+                    zones_out = gr.JSON(label="Training Zones")
+
+            # Panel 2 — Run History
+            with gr.Group(visible=False, elem_id="panel-history") as panel_history:
+                gr.HTML("""
+                    <div class="page-header">
+                        <span class="page-header-icon">🏃</span>
+                        <div>
+                            <div class="page-header-title">Run History</div>
+                            <div class="page-header-sub">Upload .fit files · duplicates ignored · metrics: pace, HR, drift, cadence, elevation</div>
+                        </div>
+                    </div>
+                """)
+                gr.HTML('<div class="section-label"><div class="section-label-text">Add runs</div></div>')
+                hist_files = gr.File(file_count="multiple", file_types=[".fit"], label="FIT files")
+                with gr.Row():
+                    hist_btn       = gr.Button("Add to history", variant="primary")
+                    hist_clear_btn = gr.Button("Clear all history", variant="stop")
+                hist_msg = gr.Textbox(label="Status", interactive=False)
+                gr.HTML('<div class="section-label"><div class="section-label-text">Run log</div></div>')
+                hist_df  = gr.Dataframe(label="", wrap=True)
+                hist_btn.click(process_history, inputs=hist_files, outputs=[hist_df, hist_msg])
+                hist_clear_btn.click(clear_history, outputs=[hist_df, hist_msg])
+
+            # Panel 3 — Adjustments
+            with gr.Group(visible=False, elem_id="panel-adj") as panel_adj:
+                gr.HTML("""
+                    <div class="page-header">
+                        <span class="page-header-icon">✏️</span>
+                        <div>
+                            <div class="page-header-title">Adjustments</div>
+                            <div class="page-header-sub">Physio, travel, illness — describe it and the plan updates immediately</div>
+                        </div>
+                    </div>
+                """)
+                gr.HTML('<div class="section-label"><div class="section-label-text">What\'s going on?</div></div>')
+                adj_message_in = gr.Textbox(
+                    label="",
+                    placeholder="e.g. Still doing physio for my knee — skipping LRP for 3 weeks, easy runs only.",
+                    lines=3,
+                )
+                gr.HTML('<div class="section-label"><div class="section-label-text">Scope</div></div>')
+                with gr.Row():
+                    adj_from_in  = gr.Number(label="Starting from week #", value=1, precision=0, minimum=1)
+                    adj_weeks_in = gr.Number(label="For how many weeks  (0 = rest of plan)",
+                                              value=3, precision=0, minimum=0)
+
+                gr.HTML('<div class="section-label"><div class="section-label-text">What to change</div></div>')
+                with gr.Row():
+                    adj_no_lrp_in    = gr.Checkbox(label="Skip LRP club runs → replace with easy")
+                    adj_easy_only_in = gr.Checkbox(label="Easy runs only → remove all quality sessions")
+                adj_volume_in = gr.Slider(60, 110, value=100, step=5, label="Volume (% of planned km)")
+
+                adj_btn = gr.Button("Apply to plan & get coaching note", variant="primary")
+
+                gr.HTML('<div class="section-label"><div class="section-label-text">Coach response</div></div>')
+                adj_note_out    = gr.Textbox(label="", lines=10, interactive=False)
+                gr.HTML('<div class="section-label"><div class="section-label-text">Changes applied</div></div>')
+                adj_changes_out = gr.JSON(label="")
+                gr.HTML('<div class="section-label"><div class="section-label-text">Updated plan</div></div>')
+                adj_plan_out    = gr.Dataframe(label="", wrap=True)
+
+                adj_btn.click(
+                    apply_adjustments_ui,
+                    inputs=[adj_message_in, adj_from_in, adj_weeks_in,
+                            adj_no_lrp_in, adj_easy_only_in, adj_volume_in],
+                    outputs=[adj_note_out, adj_changes_out, adj_plan_out],
+                )
+
+            # Panel 4 — Weekly Check-in
+            with gr.Group(visible=False, elem_id="panel-checkin") as panel_checkin:
+                gr.HTML("""
+                    <div class="page-header">
+                        <span class="page-header-icon">✅</span>
+                        <div>
+                            <div class="page-header-title">Weekly Check-in</div>
+                            <div class="page-header-sub">Score pace · HR · volume · feeling → adapt next week · get your coaching note</div>
+                        </div>
+                    </div>
+                """)
+                gr.HTML('<div class="section-label"><div class="section-label-text">This week</div></div>')
+                with gr.Row():
+                    checkin_week = gr.Number(label="Plan week number", value=1, precision=0, minimum=1)
+                    feeling_in   = gr.Slider(1, 5, value=3, step=0.5,
+                                             label="Overall feeling  (1 = rough · 5 = excellent)")
+                    prev_hr_in   = gr.Number(label="Last week avg easy HR (bpm, optional)", value=None)
+
+                checkin_files = gr.File(file_count="multiple", file_types=[".fit"],
+                                        label="FIT files for this week")
+                checkin_btn   = gr.Button("Analyse week & get coaching note", variant="primary")
+
+                gr.HTML('<div class="section-label"><div class="section-label-text">Performance assessment</div></div>')
+                checkin_json = gr.JSON(label="")
+                gr.HTML('<div class="section-label"><div class="section-label-text">Your coaching note</div></div>')
+                coaching_out = gr.Textbox(label="", lines=12, interactive=False)
+                gr.HTML('<div class="section-label"><div class="section-label-text">Updated plan</div></div>')
+                checkin_plan_out = gr.Dataframe(label="", wrap=True)
+
+                checkin_btn.click(
+                    checkin,
+                    inputs=[checkin_week, checkin_files, feeling_in, prev_hr_in],
+                    outputs=[checkin_json, coaching_out, checkin_plan_out],
+                )
+
+    # ── Nav button wiring ──────────────────────────────────────────────────
+    _panels = [panel_plan, panel_setup, panel_history, panel_adj, panel_checkin]
+    _btns   = [btn_plan, btn_setup, btn_hist, btn_adj, btn_checkin]
+
+    for _i, _btn in enumerate(_btns):
+        _btn.click(_nav_handler(_i), outputs=_panels + _btns)
+
+    # ── Setup: edit / cancel toggles ──────────────────────────────────────
+    edit_btn.click(
+        lambda: (gr.update(visible=False), gr.update(visible=True)),
+        outputs=[setup_summary, setup_form],
     )
-    status_bar = gr.Markdown("")
+    cancel_edit_btn.click(
+        lambda: (gr.update(visible=True), gr.update(visible=False)),
+        outputs=[setup_summary, setup_form],
+    )
 
-    # ── Tab 1: Setup & Plan ───────────────────────────────────────────────
-    with gr.Tab("Setup & Plan"):
-        gr.Markdown(
-            "Fill in your profile and click **Update Plan**. "
-            "Your settings are saved automatically and will reload next time you open the app."
-        )
-        gr.Markdown("## Profile & Goals")
-        with gr.Row():
-            name_in          = gr.Textbox(label="Your name", value=_prof.get("name", "Cecilia"))
-            goal_race_in     = gr.Textbox(label="Target race", value=_prof.get("goal_race", ""),
-                                          placeholder="Paris Marathon 2027")
-            marathon_date_in = gr.Textbox(label="Race date (YYYY-MM-DD)",
-                                          value=_prof.get("marathon_date", ""),
-                                          placeholder="2027-04-11")
+    # ── LRP session 2 add / remove ────────────────────────────────────────
+    add_lrp2_btn.click(
+        lambda: (gr.update(visible=True), gr.update(visible=False), True),
+        outputs=[lrp2_group, add_lrp2_btn, lrp2_visible_state],
+    )
+    remove_lrp2_btn.click(
+        lambda: (gr.update(visible=False), gr.update(visible=True), False),
+        outputs=[lrp2_group, add_lrp2_btn, lrp2_visible_state],
+    )
 
-        gr.Markdown("### Target finish time")
-        with gr.Row():
-            goal_h = gr.Number(label="Hours",   value=_g_h, precision=0, minimum=2, maximum=7)
-            goal_m = gr.Number(label="Minutes", value=_g_m, precision=0, minimum=0, maximum=59)
-            goal_s = gr.Number(label="Seconds", value=_g_s, precision=0, minimum=0, maximum=59)
+    # ── Generate button ────────────────────────────────────────────────────
+    def _generate_and_show_summary(*args):
+        result = compute_and_generate(*args)
+        zones_out_val, plan_html, msg, summary_html = result
+        return (zones_out_val, plan_html, msg, summary_html,
+                gr.update(visible=True), gr.update(visible=False))
 
-        gr.Markdown("### Benchmark 1 — required (recent race or time trial)")
-        with gr.Row():
-            b1_dist = gr.Dropdown(DIST_KEYS, label="Distance", value=_b1_dist_saved)
-            b1_h    = gr.Number(label="h",   value=_b1_h, precision=0, minimum=0, maximum=5)
-            b1_m    = gr.Number(label="min", value=_b1_m, precision=0, minimum=0, maximum=59)
-            b1_s    = gr.Number(label="sec", value=_b1_s, precision=0, minimum=0, maximum=59)
-
-        gr.Markdown(
-            "### Benchmark 2 — optional\n"
-            "A *different* distance gives an exact SVC via the Monod-Billat formula. "
-            "Leave at zero if you only have one result."
-        )
-        with gr.Row():
-            b2_dist = gr.Dropdown(DIST_KEYS, label="Distance", value=_b2_dist_saved)
-            b2_h    = gr.Number(label="h",   value=_b2_h, precision=0, minimum=0, maximum=5)
-            b2_m    = gr.Number(label="min", value=_b2_m, precision=0, minimum=0, maximum=59)
-            b2_s    = gr.Number(label="sec", value=_b2_s, precision=0, minimum=0, maximum=59)
-
-        gr.Markdown("### Physical status")
-        with gr.Row():
-            injury_in       = gr.Radio(
-                ["none", "light", "moderate"], label="Rehab / injury level",
-                value=_prof.get("injury_level", "none"),
-                info="none = full training  ·  light = reduced intensity  ·  moderate = significant restriction",
-            )
-            injury_notes_in = gr.Textbox(label="Notes", value=_prof.get("injury_notes", ""), lines=2)
-
-        gr.Markdown("## Weekly Schedule")
-        run_days_in = gr.CheckboxGroup(
-            WEEKDAY_LABELS, label="Days available for running",
-            value=_saved_run_days,
-        )
-        gr.Markdown("### LRP club runs (locked into plan)")
-        with gr.Row():
-            lrp_day_in  = gr.Dropdown(["None"] + WEEKDAY_LABELS, label="Club run day",
-                                       value=_saved_lrp_day)
-            lrp_km_in   = gr.Number(label="Approx. distance (km)",
-                                     value=_sched.get("lrp_km", 12), minimum=5, maximum=35)
-            lrp_type_in = gr.Radio(["easy", "tempo", "long"], label="Session type",
-                                    value=_sched.get("lrp_type", "easy"))
-
-        gr.Markdown("### Cross-training")
-        with gr.Row():
-            strength_in = gr.CheckboxGroup(WEEKDAY_LABELS, label="Strength days",
-                                            value=_saved_strength)
-            cycling_in  = gr.CheckboxGroup(WEEKDAY_LABELS, label="Cycling / Zwift days",
-                                            value=_saved_cycling)
-
-        gen_btn   = gr.Button("Update Plan" if _has_plan else "Calculate Zones & Generate Plan",
-                               variant="primary", size="lg")
-        gen_msg   = gr.Textbox(label="Status", interactive=False)
-        zones_out = gr.JSON(label="Training Zones")
-
-    # ── Tab 2: Run History ────────────────────────────────────────────────
-    with gr.Tab("Run History"):
-        gr.Markdown(
-            "Upload .fit files to add runs to your history log. "
-            "**Already-saved runs are not duplicated** — only new dates are added. "
-            "Metrics: distance, duration, pace, avg HR, max HR, HR drift, cadence, elevation gain."
-        )
-        hist_files = gr.File(file_count="multiple", file_types=[".fit"], label="Add FIT files")
-        with gr.Row():
-            hist_btn       = gr.Button("Add to history", variant="primary")
-            hist_clear_btn = gr.Button("Clear all history", variant="stop")
-        hist_msg = gr.Textbox(label="Status", interactive=False)
-        hist_df  = gr.Dataframe(label="Run log", wrap=True)
-        hist_btn.click(process_history, inputs=hist_files, outputs=[hist_df, hist_msg])
-        hist_clear_btn.click(clear_history, outputs=[hist_df, hist_msg])
-
-    # ── Tab 3: My Plan ────────────────────────────────────────────────────
-    with gr.Tab("My Plan"):
-        gr.Markdown(
-            "Your plan loads automatically. "
-            "After any adjustment or check-in the plan here reflects the latest state."
-        )
-        plan_df = gr.Dataframe(label="Week-by-week plan", wrap=True)
-
-    # ── Tab 4: Adjustments ───────────────────────────────────────────────
-    with gr.Tab("Adjustments"):
-        gr.Markdown(
-            "## Tell your coach what's changed\n"
-            "Physio, travel, illness, extra fatigue — describe the situation, "
-            "set how many weeks are affected, and the plan updates immediately. "
-            "The AI writes a coaching note explaining the change."
-        )
-        adj_message_in = gr.Textbox(
-            label="What's going on?",
-            placeholder="e.g. Still doing physio for my knee — skipping LRP for 3 weeks, easy runs only.",
-            lines=3,
-        )
-        with gr.Row():
-            adj_from_in  = gr.Number(label="Starting from week #", value=1, precision=0, minimum=1)
-            adj_weeks_in = gr.Number(label="For how many weeks  (0 = rest of plan)",
-                                      value=3, precision=0, minimum=0)
-
-        gr.Markdown("### What to change")
-        with gr.Row():
-            adj_no_lrp_in    = gr.Checkbox(label="Skip LRP club runs → replace with easy")
-            adj_easy_only_in = gr.Checkbox(label="Easy runs only → remove all quality sessions")
-        adj_volume_in = gr.Slider(60, 110, value=100, step=5, label="Volume (% of planned km)")
-
-        adj_btn = gr.Button("Apply to plan & get coaching note", variant="primary")
-        gr.Markdown("### Coach response")
-        adj_note_out    = gr.Textbox(label="From your coach", lines=10, interactive=False)
-        adj_changes_out = gr.JSON(label="Changes applied")
-        adj_plan_out    = gr.Dataframe(label="Updated plan", wrap=True)
-
-        adj_btn.click(
-            apply_adjustments_ui,
-            inputs=[adj_message_in, adj_from_in, adj_weeks_in,
-                    adj_no_lrp_in, adj_easy_only_in, adj_volume_in],
-            outputs=[adj_note_out, adj_changes_out, adj_plan_out],
-        )
-
-    # ── Tab 5: Weekly Check-in ────────────────────────────────────────────
-    with gr.Tab("Weekly Check-in"):
-        gr.Markdown(
-            "## End-of-week coaching session\n"
-            "Upload this week's FIT files and rate how you felt. "
-            "The app scores pace, HR trend, HR drift, volume, and feeling — "
-            "then adapts next week's plan and writes your coaching note."
-        )
-        with gr.Row():
-            checkin_week = gr.Number(label="Plan week number", value=1, precision=0, minimum=1)
-            feeling_in   = gr.Slider(1, 5, value=3, step=0.5,
-                                     label="Overall feeling  (1 = rough · 5 = excellent)")
-            prev_hr_in   = gr.Number(label="Last week avg easy HR (bpm, optional)", value=None)
-
-        checkin_files = gr.File(file_count="multiple", file_types=[".fit"],
-                                label="This week's FIT files")
-        checkin_btn   = gr.Button("Analyse week & get coaching note", variant="primary")
-
-        gr.Markdown("### Performance assessment")
-        checkin_json = gr.JSON(label="Week summary & adaptations")
-        gr.Markdown("### Your coaching note")
-        coaching_out = gr.Textbox(label="From your coach", lines=12, interactive=False)
-        gr.Markdown("### Updated plan")
-        checkin_plan_out = gr.Dataframe(label="Plan (next week adapted)", wrap=True)
-
-        checkin_btn.click(
-            checkin,
-            inputs=[checkin_week, checkin_files, feeling_in, prev_hr_in],
-            outputs=[checkin_json, coaching_out, checkin_plan_out],
-        )
-
-    # ── Wire generate button ──────────────────────────────────────────────
     gen_btn.click(
-        compute_and_generate,
+        _generate_and_show_summary,
         inputs=[
             name_in, goal_race_in, marathon_date_in,
             goal_h, goal_m, goal_s,
             b1_dist, b1_h, b1_m, b1_s,
             b2_dist, b2_h, b2_m, b2_s,
             injury_in, injury_notes_in,
-            run_days_in, lrp_day_in, lrp_km_in, lrp_type_in,
+            run_days_in,
+            lrp1_day_in, lrp1_km_in, lrp1_type_in,
+            lrp2_day_in, lrp2_km_in, lrp2_type_in, lrp2_visible_state,
             strength_in, cycling_in,
         ],
-        outputs=[zones_out, plan_df, gen_msg],
+        outputs=[zones_out, plan_df, gen_msg, profile_summary_html,
+                 setup_summary, setup_form],
     )
 
-    # ── Load saved data on page open ─────────────────────────────────────
+    # ── Load saved data on page open ──────────────────────────────────────
     demo.load(load_status_on_start,  outputs=status_bar)
     demo.load(load_plan_on_start,    outputs=plan_df)
     demo.load(load_history_on_start, outputs=hist_df)
 
 
 if __name__ == "__main__":
-    demo.queue().launch()
+    demo.queue().launch(allowed_paths=["scripts"])

@@ -2,7 +2,7 @@
 
 A local AI coaching app for marathon training. Generates a personalised week-by-week plan using the Daniels VDOT + Critical Velocity (SVC) hybrid method, adapts the plan each week based on your actual FIT file data and feeling score, and writes coaching notes via a local LLM running on Apple Silicon — no subscriptions, no API keys, no data leaving your machine.
 
-Built as a portfolio piece carved out of a real coaching workflow used by [LRP (Les Runners Parisiens)](https://www.lrp.run).
+Built as a portfolio piece carved out of a real coaching workflow used by [LRP (Let's Run Paris)](https://www.strava.com/clubs/letsrunparis).
 
 ## Features
 

@@ -170,24 +170,28 @@ def _quality(phase: str, wk: int, z: Zones, injury: str) -> Session:
 
 def _build_week(
     week_start: date, wk: int, total: int, phase: str, zones: Zones,
-    target_km: float, run_days: list, lrp_day: Optional[int],
-    lrp_km: float, lrp_type: str,
+    target_km: float, run_days: list, lrp_sessions: list,
     strength_days: list, cycling_days: list, injury: str,
 ) -> list:
     sessions: dict[int, Session] = {}
 
-    # 1. Lock LRP club run
-    if lrp_day is not None:
-        if lrp_type == "tempo":
+    # 1. Lock all LRP club sessions
+    for s in lrp_sessions:
+        day = s.get("day")
+        if day is None:
+            continue
+        km    = float(s.get("km", 12.0))
+        stype = s.get("type", "easy")
+        if stype == "tempo":
             pace_target = fmt_pace(zones.threshold)
-        elif lrp_type == "long":
+        elif stype == "long":
             pace_target = fmt_pace(zones.easy_lo)
         else:
             pace_target = fmt_pace(zones.easy_hi)
-        sessions[lrp_day] = Session(
+        sessions[day] = Session(
             CLUB_RUN,
-            f"LRP club run — {lrp_km:.0f} km ({lrp_type})",
-            distance_km=lrp_km,
+            f"LRP club run — {km:.0f} km ({stype})",
+            distance_km=km,
             targets={"pace": pace_target},
         )
 
@@ -248,16 +252,22 @@ def generate_plan(
     goal_time_s: int,
     zones: Zones,
     run_days: list,
-    lrp_day: Optional[int],
-    lrp_km: float,
-    lrp_type: str,
+    lrp_sessions: list,
     strength_days: list,
     cycling_days: list,
     injury: str = "none",
     start_km: Optional[float] = None,
+    # Legacy single-session params — kept for backward compat, ignored if lrp_sessions non-empty
+    lrp_day: Optional[int] = None,
+    lrp_km: float = 12.0,
+    lrp_type: str = "easy",
 ) -> list:
     if not run_days:
         return []
+
+    # Back-compat: if caller passes old single-session params, wrap them
+    if not lrp_sessions and lrp_day is not None:
+        lrp_sessions = [{"day": lrp_day, "km": lrp_km, "type": lrp_type}]
 
     today = date.today()
     weeks = max(4, min(20, (marathon_date - today).days // 7))
@@ -271,8 +281,10 @@ def generate_plan(
         peak *= 0.70
         base *= 0.70
 
-    if lrp_day is not None and lrp_day not in run_days:
-        run_days = sorted(run_days + [lrp_day])
+    for s in lrp_sessions:
+        day = s.get("day")
+        if day is not None and day not in run_days:
+            run_days = sorted(run_days + [day])
 
     taper_start = weeks - 3
     plan = []
@@ -296,7 +308,7 @@ def generate_plan(
         week_start = today + timedelta(weeks=wk - 1)
         days = _build_week(
             week_start, wk, weeks, phase, zones,
-            target_km, list(run_days), lrp_day, lrp_km, lrp_type,
+            target_km, list(run_days), lrp_sessions,
             list(strength_days), list(cycling_days), injury,
         )
         plan.append(WeekPlan(
