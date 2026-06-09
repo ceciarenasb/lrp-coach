@@ -269,7 +269,7 @@ def generate_plan(
     if not lrp_sessions and lrp_day is not None:
         lrp_sessions = [{"day": lrp_day, "km": lrp_km, "type": lrp_type}]
 
-    today = date.today()
+    today = date.today() + timedelta(days=1)  # plan starts tomorrow, never today
     weeks = max(4, min(20, (marathon_date - today).days // 7))
     peak = _peak_km(goal_time_s)
     base = start_km if start_km else peak * 0.55

@@ -1791,7 +1791,8 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
         result = compute_and_generate(*args)
         zones_out_val, plan_html, msg, summary_html = result
         return (zones_out_val, plan_html, msg, summary_html,
-                gr.update(visible=True), gr.update(visible=False))
+                gr.update(visible=True), gr.update(visible=False),
+                load_status_on_start())
 
     gen_btn.click(
         _generate_and_show_summary,
@@ -1809,7 +1810,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
             strength_in, cycling_in,
         ],
         outputs=[zones_out, plan_df, gen_msg, profile_summary_html,
-                 setup_summary, setup_form],
+                 setup_summary, setup_form, status_bar],
     )
 
     # ── Load saved data on page open ──────────────────────────────────────
