@@ -11,11 +11,14 @@ from coach import adjustments as adj_mod
 from coach import fit as fit_mod
 from coach import llm as llm_mod
 from coach import state as state_mod
+from coach import garmin as garmin_mod
+from coach import scheduler as sched_mod
 from coach.adapt import WeekMetrics, score_week
 from coach.plan import generate_plan
 from coach.zones import (
     Zones, build_zones, cv_from_two_efforts, cv_from_vdot,
-    fmt_pace, vdot_from_race, zones_summary,
+    fmt_pace, infer_vdot_adjustment, vdot_from_race, vdot_recency_factor,
+    zones_summary,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -46,8 +49,10 @@ _g_h, _g_m, _g_s = _time_parts(_prof.get("goal_time_s", 13500))
 
 _b1_dist_saved = _prof.get("b1_dist", "Half-marathon")
 _b1_h, _b1_m, _b1_s = _time_parts(_prof.get("b1_time_s", 6300))
+_b1_date_saved = _prof.get("b1_date", "")
 _b2_dist_saved = _prof.get("b2_dist", "10 km")
 _b2_h, _b2_m, _b2_s = _time_parts(_prof.get("b2_time_s", 2850))
+_b2_date_saved = _prof.get("b2_date", "")
 
 _saved_run_days = [WEEKDAY_LABELS[i] for i in _sched.get("run_days", [1, 3, 4, 5, 6])]
 _saved_strength = [WEEKDAY_LABELS[i] for i in _sched.get("strength_days", [])]
@@ -66,14 +71,18 @@ def _load_lrp_sessions(sched: dict) -> list:
 _saved_lrp_sessions = _load_lrp_sessions(_sched)
 _lrp1 = _saved_lrp_sessions[0] if len(_saved_lrp_sessions) > 0 else {}
 _lrp2 = _saved_lrp_sessions[1] if len(_saved_lrp_sessions) > 1 else {}
+_lrp3 = _saved_lrp_sessions[2] if len(_saved_lrp_sessions) > 2 else {}
+_lrp4 = _saved_lrp_sessions[3] if len(_saved_lrp_sessions) > 3 else {}
 
-_lrp1_day  = WEEKDAY_LABELS[_lrp1["day"]] if _lrp1.get("day") is not None else "None"
-_lrp1_km   = _lrp1.get("km", 12.0)
-_lrp1_type = _lrp1.get("type", "easy")
-_lrp2_day  = WEEKDAY_LABELS[_lrp2["day"]] if _lrp2.get("day") is not None else "None"
-_lrp2_km   = _lrp2.get("km", 10.0)
-_lrp2_type = _lrp2.get("type", "easy")
+def _lrp_day_label(s): return WEEKDAY_LABELS[s["day"]] if s.get("day") is not None else "None"
+
+_lrp1_day  = _lrp_day_label(_lrp1);  _lrp1_km = _lrp1.get("km", 12.0); _lrp1_type = _lrp1.get("type", "easy")
+_lrp2_day  = _lrp_day_label(_lrp2);  _lrp2_km = _lrp2.get("km", 10.0); _lrp2_type = _lrp2.get("type", "easy")
+_lrp3_day  = _lrp_day_label(_lrp3);  _lrp3_km = _lrp3.get("km", 10.0); _lrp3_type = _lrp3.get("type", "easy")
+_lrp4_day  = _lrp_day_label(_lrp4);  _lrp4_km = _lrp4.get("km", 10.0); _lrp4_type = _lrp4.get("type", "easy")
 _has_lrp2  = bool(_lrp2.get("day") is not None)
+_has_lrp3  = bool(_lrp3.get("day") is not None)
+_has_lrp4  = bool(_lrp4.get("day") is not None)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -88,6 +97,48 @@ def _fmt_duration(total_s: int) -> str:
     h, r = divmod(int(total_s), 3600)
     m, s = divmod(r, 60)
     return f"{h}:{m:02d}:{s:02d}"
+
+
+def _format_history_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename raw metric keys and format values for display."""
+    if df.empty:
+        return df
+    d = df.copy()
+    if "duration_s" in d.columns:
+        def _dur(s):
+            try:
+                s = int(float(s))
+            except (TypeError, ValueError):
+                return "—"
+            h, r = divmod(s, 3600)
+            m = r // 60
+            return f"{h}h{m:02d}m" if h else f"{m}m"
+        d["duration_s"] = d["duration_s"].apply(_dur)
+    if "avg_pace_s" in d.columns:
+        def _pace(s):
+            try:
+                s = int(float(s))
+                return "—" if s <= 0 else f"{s // 60}:{s % 60:02d}/km"
+            except (TypeError, ValueError):
+                return "—"
+        d["avg_pace_s"] = d["avg_pace_s"].apply(_pace)
+    if "distance_km" in d.columns:
+        d["distance_km"] = d["distance_km"].apply(
+            lambda x: f"{float(x):.1f}" if pd.notna(x) and x else "—")
+    if "hr_drift_pct" in d.columns:
+        d["hr_drift_pct"] = d["hr_drift_pct"].apply(
+            lambda x: f"{float(x):.1f}%" if pd.notna(x) and x else "—")
+    d = d.rename(columns={
+        "date": "Date", "distance_km": "Distance (km)", "duration_s": "Duration",
+        "avg_pace_s": "Avg Pace", "avg_hr": "Avg HR", "max_hr": "Max HR",
+        "hr_drift_pct": "HR Drift", "avg_cadence_spm": "Cadence",
+        "elevation_gain_m": "Elevation (m)",
+    })
+    order = ["Date", "Distance (km)", "Duration", "Avg Pace", "Avg HR",
+             "HR Drift", "Elevation (m)", "Cadence", "Max HR"]
+    cols = [c for c in order if c in d.columns] + \
+           [c for c in d.columns if c not in order]
+    return d[cols]
 
 
 def _plan_to_df(plan: list) -> pd.DataFrame:
@@ -214,7 +265,7 @@ def load_plan_on_start():
 
 def load_history_on_start():
     hist = state_mod.load().get("history", [])
-    return pd.DataFrame(hist) if hist else pd.DataFrame()
+    return _format_history_df(pd.DataFrame(hist)) if hist else pd.DataFrame()
 
 
 def load_status_on_start():
@@ -244,15 +295,22 @@ def load_status_on_start():
 def _parse_lrp_sessions(
     lrp1_day, lrp1_km, lrp1_type,
     lrp2_day, lrp2_km, lrp2_type, lrp2_visible,
+    lrp3_day, lrp3_km, lrp3_type, lrp3_visible,
+    lrp4_day, lrp4_km, lrp4_type, lrp4_visible,
 ) -> list:
     sessions = []
-    d1 = WEEKDAY_MAP.get(lrp1_day) if lrp1_day and lrp1_day != "None" else None
-    if d1 is not None:
-        sessions.append({"day": d1, "km": float(lrp1_km or 12), "type": lrp1_type or "easy"})
-    if lrp2_visible:
-        d2 = WEEKDAY_MAP.get(lrp2_day) if lrp2_day and lrp2_day != "None" else None
-        if d2 is not None:
-            sessions.append({"day": d2, "km": float(lrp2_km or 10), "type": lrp2_type or "easy"})
+    slot_defaults = [12, 10, 10, 10]
+    for i, (day_v, km_v, type_v, visible) in enumerate([
+        (lrp1_day, lrp1_km, lrp1_type, True),
+        (lrp2_day, lrp2_km, lrp2_type, lrp2_visible),
+        (lrp3_day, lrp3_km, lrp3_type, lrp3_visible),
+        (lrp4_day, lrp4_km, lrp4_type, lrp4_visible),
+    ]):
+        if not visible:
+            continue
+        d = WEEKDAY_MAP.get(day_v) if day_v and day_v != "None" else None
+        if d is not None:
+            sessions.append({"day": d, "km": float(km_v or slot_defaults[i]), "type": type_v or "easy"})
     return sessions
 
 
@@ -311,12 +369,14 @@ def _profile_summary_html(profile: dict, schedule: dict, zones_data: dict) -> st
 def compute_and_generate(
     name, goal_race, marathon_date_str,
     goal_h, goal_m, goal_s,
-    b1_dist, b1_h, b1_m, b1_s,
-    b2_dist, b2_h, b2_m, b2_s,
+    b1_dist, b1_h, b1_m, b1_s, b1_date_str,
+    b2_dist, b2_h, b2_m, b2_s, b2_date_str,
     injury_level, injury_notes,
     run_days_labels,
     lrp1_day, lrp1_km, lrp1_type,
     lrp2_day, lrp2_km, lrp2_type, lrp2_visible,
+    lrp3_day, lrp3_km, lrp3_type, lrp3_visible,
+    lrp4_day, lrp4_km, lrp4_type, lrp4_visible,
     strength_labels, cycling_labels,
 ):
     goal_total = _parse_time(goal_h, goal_m, goal_s)
@@ -333,11 +393,15 @@ def compute_and_generate(
     if not b1_time or not b1_m_val:
         return {"error": "Invalid benchmark 1"}, None, "Fix errors above.", ""
 
-    vdot     = vdot_from_race(b1_m_val, b1_time)
+    recency1 = vdot_recency_factor(b1_date_str) if b1_date_str else 1.0
+    vdot     = vdot_from_race(b1_m_val, b1_time) * recency1
     b2_time  = _parse_time(b2_h, b2_m, b2_s)
     b2_m_val = DISTANCES.get(b2_dist)
 
     if b2_time and b2_m_val and b2_m_val != b1_m_val:
+        recency2  = vdot_recency_factor(b2_date_str) if b2_date_str else 1.0
+        vdot2     = vdot_from_race(b2_m_val, b2_time) * recency2
+        vdot      = (vdot + vdot2) / 2
         efforts   = sorted([(b1_m_val, b1_time), (b2_m_val, b2_time)])
         cv        = cv_from_two_efforts(efforts[0][0], efforts[0][1], efforts[1][0], efforts[1][1])
         cv_source = "exact (Monod-Billat)"
@@ -347,8 +411,12 @@ def compute_and_generate(
 
     zones        = build_zones(vdot, cv)
     run_days     = sorted([WEEKDAY_MAP[d] for d in (run_days_labels or [])])
-    lrp_sessions = _parse_lrp_sessions(lrp1_day, lrp1_km, lrp1_type,
-                                        lrp2_day, lrp2_km, lrp2_type, lrp2_visible)
+    lrp_sessions = _parse_lrp_sessions(
+        lrp1_day, lrp1_km, lrp1_type,
+        lrp2_day, lrp2_km, lrp2_type, lrp2_visible,
+        lrp3_day, lrp3_km, lrp3_type, lrp3_visible,
+        lrp4_day, lrp4_km, lrp4_type, lrp4_visible,
+    )
     strength     = [WEEKDAY_MAP[d] for d in (strength_labels or [])]
     cycling      = [WEEKDAY_MAP[d] for d in (cycling_labels or [])]
 
@@ -369,8 +437,8 @@ def compute_and_generate(
         "goal_time_s": goal_total,
         "injury_level": injury_level,
         "injury_notes": injury_notes,
-        "b1_dist": b1_dist, "b1_time_s": b1_time,
-        "b2_dist": b2_dist, "b2_time_s": b2_time or 0,
+        "b1_dist": b1_dist, "b1_time_s": b1_time, "b1_date": b1_date_str or "",
+        "b2_dist": b2_dist, "b2_time_s": b2_time or 0, "b2_date": b2_date_str or "",
     }
     new_schedule = {
         "run_days": run_days,
@@ -406,9 +474,12 @@ def compute_and_generate(
 
     zs = zones_summary(zones)
     zs["CV source"] = cv_source
+    recency_note = ""
+    if b1_date_str and recency1 < 1.0:
+        recency_note = f"  |  Benchmark discounted {round((1-recency1)*100):.0f}% (age)"
     msg = (f"Plan saved — {len(plan)} weeks to {goal_race}  |  "
            f"VDOT {zones.vdot}  |  SVC {zones.cv_mps * 3.6:.1f} km/h  |  "
-           f"Target {_fmt_duration(goal_total)}")
+           f"Target {_fmt_duration(goal_total)}{recency_note}")
     summary_html = _profile_summary_html(new_profile, new_schedule, zones.__dict__)
     return zs, _plan_to_html(existing["plan"]), msg, summary_html
 
@@ -433,7 +504,7 @@ def process_history(files):
 
     state_mod.update("history", merged)
     msg = f"{len(added)} new run{'s' if len(added) != 1 else ''} added  ({len(merged)} total saved)"
-    return pd.DataFrame(merged), msg
+    return _format_history_df(pd.DataFrame(merged)), msg
 
 
 def clear_history():
@@ -585,6 +656,16 @@ def checkin(week_num, files, feeling, prev_hr_input):
     result = score_week(metrics)
 
     state["plan"] = _apply_checkin_adaptation(plan, wk_idx, result, zones_data)
+
+    updated_zones = infer_vdot_adjustment(Zones(**zones_data), state.get("history", []))
+    zones_update_note = ""
+    if updated_zones is not None:
+        delta = round(updated_zones.vdot - zones_data.get("vdot", 0), 1)
+        direction = "↑" if delta > 0 else "↓"
+        zones_update_note = f"VDOT {direction}{abs(delta):.1f} → {updated_zones.vdot} (auto-updated from recent runs)"
+        state["zones"] = updated_zones.__dict__
+        zones_data = updated_zones.__dict__
+
     state_mod.save(state)
 
     assessment = {
@@ -598,6 +679,8 @@ def checkin(week_num, files, feeling, prev_hr_input):
         "Quality session":  "→ replaced with easy run" if result.drop_quality else "kept as planned",
         "Extra recovery":   "yes" if result.add_recovery else "no",
     }
+    if zones_update_note:
+        assessment["Zones updated"] = zones_update_note
 
     z          = Zones(**zones_data)
     weeks_left = len(plan) - wk_idx
@@ -613,6 +696,252 @@ def checkin(week_num, files, feeling, prev_hr_input):
     ))
 
     return assessment, note, _plan_to_df(state["plan"])
+
+
+# ── Garmin Connect UI helpers ─────────────────────────────────────────────
+
+def _garmin_status_html(connected: bool, email: str | None) -> str:
+    if connected:
+        return (
+            "<div style='display:inline-flex;align-items:center;gap:8px;"
+            "background:#DCFCE7;border:1px solid #86EFAC;border-radius:8px;"
+            "padding:8px 14px;font-size:13px;font-family:-apple-system,sans-serif'>"
+            "<span style='color:#16A34A;font-size:14px'>●</span>"
+            f"<span style='color:#166534;font-weight:500'>Connected as {email}</span>"
+            "</div>"
+        )
+    return (
+        "<div style='display:inline-flex;align-items:center;gap:8px;"
+        "background:#FEF2F2;border:1px solid #FCA5A5;border-radius:8px;"
+        "padding:8px 14px;font-size:13px;font-family:-apple-system,sans-serif'>"
+        "<span style='color:#DC2626;font-size:14px'>○</span>"
+        "<span style='color:#991B1B;font-weight:500'>Not connected</span>"
+        "</div>"
+    )
+
+
+def load_garmin_ui():
+    status = garmin_mod.connection_status()
+    connected = status != "not_connected"
+    email = status.replace("connected:", "") if connected else None
+    s = state_mod.load()
+    auto_sync = s.get("garmin_auto_sync", False)
+    next_run = sched_mod.next_run_str() if auto_sync else ""
+    return (
+        _garmin_status_html(connected, email),
+        gr.update(visible=not connected),
+        gr.update(visible=False),
+        gr.update(visible=connected),
+        auto_sync,
+        f"<span style='font-size:12px;color:#6B7280'>Next sync: {next_run}</span>" if next_run else "",
+    )
+
+
+def _garmin_ui_outputs(connected, email, auto_sync=False, next_run="", msg=""):
+    return (
+        _garmin_status_html(connected, email),
+        gr.update(visible=not connected),
+        gr.update(visible=False),
+        gr.update(visible=connected),
+        auto_sync,
+        f"<span style='font-size:12px;color:#6B7280'>Next sync: {next_run}</span>" if next_run else "",
+        msg,
+    )
+
+
+def garmin_connect_ui(email, password):
+    if not email or not password:
+        return _garmin_ui_outputs(False, None, msg="Enter email and password.")
+    ok, msg = garmin_mod.connect(email, password)
+    if ok:
+        s = state_mod.load()
+        auto_sync = s.get("garmin_auto_sync", False)
+        return _garmin_ui_outputs(True, email, auto_sync=auto_sync, msg=msg)
+    if msg == "MFA_REQUIRED":
+        return (
+            _garmin_status_html(False, None),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=False),
+            False,
+            "",
+            "Check your email — enter the verification code below.",
+        )
+    return _garmin_ui_outputs(False, None, msg=msg)
+
+
+def garmin_mfa_ui(email, password, mfa_code):
+    ok, msg = garmin_mod.submit_mfa(email, password, mfa_code)
+    if ok:
+        return _garmin_ui_outputs(True, email, msg=msg)
+    return (
+        _garmin_status_html(False, None),
+        gr.update(visible=True),
+        gr.update(visible=True),
+        gr.update(visible=False),
+        False,
+        "",
+        msg,
+    )
+
+
+def garmin_disconnect_ui():
+    garmin_mod.clear_auth()
+    sched_mod.set_enabled(False)
+    s = state_mod.load()
+    s["garmin_auto_sync"] = False
+    state_mod.save(s)
+    return _garmin_ui_outputs(False, None, msg="Disconnected.")
+
+
+def _merge_into_history(records: list) -> tuple[pd.DataFrame, str]:
+    if not records:
+        return load_history_on_start(), ""
+    existing = state_mod.load().get("history", [])
+    existing_dates = {r["date"] for r in existing}
+    added = [r for r in records if r["date"] not in existing_dates]
+    merged = sorted(existing + added, key=lambda r: r["date"], reverse=True)
+    state_mod.update("history", merged)
+    return _format_history_df(pd.DataFrame(merged)), f"{len(added)} new run{'s' if len(added) != 1 else ''} added ({len(merged)} total)"
+
+
+def garmin_import_ui():
+    records, sync_msg = garmin_mod.sync_activities(days=30)
+    df, merge_msg = _merge_into_history(records)
+    return df, f"{sync_msg}{' — ' + merge_msg if merge_msg else ''}"
+
+
+def garmin_sync_new_ui():
+    records, sync_msg = garmin_mod.sync_activities(days=3)
+    df, merge_msg = _merge_into_history(records)
+    return df, f"{sync_msg}{' — ' + merge_msg if merge_msg else ''}"
+
+
+def garmin_autosync_toggle(enabled):
+    def _job():
+        garmin_sync_new_ui()
+
+    msg = sched_mod.set_enabled(enabled, _job if enabled else None)
+    s = state_mod.load()
+    s["garmin_auto_sync"] = enabled
+    state_mod.save(s)
+    next_run = sched_mod.next_run_str() if enabled else ""
+    return (
+        f"<span style='font-size:12px;color:#6B7280'>Next sync: {next_run}</span>" if next_run else "",
+        msg,
+    )
+
+
+# ── Weekly check-in from synced history ────────────────────────────────────
+
+def checkin_from_history(week_num, feeling, prev_hr_input):
+    s = state_mod.load()
+    plan = s.get("plan", [])
+    profile = s.get("profile", {})
+    zones_data = s.get("zones", {})
+    history = s.get("history", [])
+
+    if not plan:
+        return None, "No plan found — go to Setup & Plan first.", pd.DataFrame()
+
+    wk_idx = int(week_num) - 1
+    if wk_idx < 0 or wk_idx >= len(plan):
+        return None, f"Week {week_num} not in plan ({len(plan)} weeks total).", pd.DataFrame()
+
+    week = plan[wk_idx]
+    week_dates = {d["date"] for d in week["days"]}
+    week_records = [r for r in history if r.get("date") in week_dates]
+
+    if not week_records:
+        return (
+            None,
+            f"No synced runs found for week {week_num}. Upload FIT files manually or sync from Garmin first.",
+            pd.DataFrame(),
+        )
+
+    target_km = week["target_km"]
+    quality_target_s = None
+    for d in week["days"]:
+        if d.get("session_type") in ("Tempo", "SVC Intervals", "Marathon Pace"):
+            raw = (d.get("targets", {}).get("T_pace")
+                   or d.get("targets", {}).get("SVC_pace")
+                   or d.get("targets", {}).get("M_pace"))
+            if raw and ":" in raw:
+                try:
+                    mm, ss = raw.replace(" /km", "").split(":")
+                    quality_target_s = int(mm) * 60 + int(ss)
+                except Exception:
+                    pass
+            break
+
+    actual_km, quality_pace_s = 0.0, None
+    _best_quality_dev = float("inf")
+    hr_list, drift_list = [], []
+
+    for rec in week_records:
+        actual_km += rec.get("distance_km", 0)
+        if rec.get("avg_hr"):
+            hr_list.append(rec["avg_hr"])
+        if rec.get("hr_drift_pct") is not None:
+            drift_list.append(rec["hr_drift_pct"])
+        if quality_target_s and rec.get("avg_pace_s") and rec.get("distance_km", 0) <= 16:
+            dev = abs(rec["avg_pace_s"] - quality_target_s)
+            if dev <= 60 and dev < _best_quality_dev:
+                quality_pace_s = rec["avg_pace_s"]
+                _best_quality_dev = dev
+
+    metrics = WeekMetrics(
+        actual_km=actual_km, target_km=target_km,
+        quality_avg_pace_s=quality_pace_s, quality_target_pace_s=quality_target_s,
+        easy_avg_hr=sum(hr_list) / len(hr_list) if hr_list else None,
+        prev_easy_hr=float(prev_hr_input) if prev_hr_input else None,
+        avg_hr_drift=sum(drift_list) / len(drift_list) if drift_list else None,
+        avg_feeling=float(feeling),
+    )
+    result = score_week(metrics)
+
+    s["plan"] = _apply_checkin_adaptation(plan, wk_idx, result, zones_data)
+
+    updated_zones = infer_vdot_adjustment(Zones(**zones_data), history)
+    zones_update_note = ""
+    if updated_zones is not None:
+        delta = round(updated_zones.vdot - zones_data.get("vdot", 0), 1)
+        direction = "↑" if delta > 0 else "↓"
+        zones_update_note = f"VDOT {direction}{abs(delta):.1f} → {updated_zones.vdot} (auto-updated)"
+        s["zones"] = updated_zones.__dict__
+        zones_data = updated_zones.__dict__
+
+    state_mod.save(s)
+
+    assessment = {
+        "Performance score": f"{result.score} / 100",
+        "Decision": result.decision,
+        "Volume": f"{actual_km:.1f} km  (target {target_km:.1f} km)",
+        "Quality session pace": (f"{fmt_pace(quality_pace_s)}  (target {fmt_pace(quality_target_s)})"
+                                  if quality_pace_s else "not detected"),
+        "Source": f"{len(week_records)} synced run{'s' if len(week_records) != 1 else ''}",
+        "Signals": result.flags,
+        "Next week volume": f"×{result.volume_adj:.2f}",
+        "Quality session": "→ replaced with easy run" if result.drop_quality else "kept as planned",
+        "Extra recovery": "yes" if result.add_recovery else "no",
+    }
+    if zones_update_note:
+        assessment["Zones updated"] = zones_update_note
+
+    z = Zones(**zones_data)
+    weeks_left = len(plan) - wk_idx
+    next_focus = plan[wk_idx + 1]["focus"] if wk_idx + 1 < len(plan) else "Race week — stay calm"
+
+    note = llm_mod.coaching_note(llm_mod.build_context(
+        name=profile.get("name", "Athlete"),
+        goal_race=profile.get("goal_race", "your marathon"),
+        goal_time=_fmt_duration(profile.get("goal_time_s", 0)),
+        weeks_left=weeks_left, phase=week["phase"],
+        zones_dict=zones_summary(z),
+        metrics=metrics, result=result, next_focus=next_focus,
+    ))
+
+    return assessment, note, _plan_to_df(s["plan"])
 
 
 # ── CSS ────────────────────────────────────────────────────────────────────
@@ -1066,6 +1395,13 @@ _theme = gr.themes.Soft(
     ),
 )
 
+def _daily_sync_job():
+    garmin_sync_new_ui()
+
+_startup = state_mod.load()
+if _startup.get("garmin_auto_sync", False) and garmin_mod.is_authenticated():
+    sched_mod.start(_daily_sync_job)
+
 with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
 
     with gr.Row(elem_id="app-layout", equal_height=True):
@@ -1144,19 +1480,23 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         goal_m = gr.Number(label="Minutes", value=_g_m, precision=0, minimum=0, maximum=59)
                         goal_s = gr.Number(label="Seconds", value=_g_s, precision=0, minimum=0, maximum=59)
 
-                    gr.HTML('<div class="section-label"><div class="section-label-text">Benchmark 1 — required</div><div class="section-label-sub">Recent race or time trial</div></div>')
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Benchmark 1 — required</div><div class="section-label-sub">Recent race or time trial · older results are slightly discounted</div></div>')
                     with gr.Row():
-                        b1_dist = gr.Dropdown(DIST_KEYS, label="Distance", value=_b1_dist_saved)
-                        b1_h    = gr.Number(label="h",   value=_b1_h, precision=0, minimum=0, maximum=5)
-                        b1_m    = gr.Number(label="min", value=_b1_m, precision=0, minimum=0, maximum=59)
-                        b1_s    = gr.Number(label="sec", value=_b1_s, precision=0, minimum=0, maximum=59)
+                        b1_dist    = gr.Dropdown(DIST_KEYS, label="Distance", value=_b1_dist_saved)
+                        b1_h       = gr.Number(label="h",   value=_b1_h, precision=0, minimum=0, maximum=5)
+                        b1_m       = gr.Number(label="min", value=_b1_m, precision=0, minimum=0, maximum=59)
+                        b1_s       = gr.Number(label="sec", value=_b1_s, precision=0, minimum=0, maximum=59)
+                        b1_date_in = gr.Textbox(label="Date (YYYY-MM-DD)", value=_b1_date_saved,
+                                                placeholder="2025-03-15", scale=2)
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Benchmark 2 — optional</div><div class="section-label-sub">Different distance → exact SVC via Monod-Billat. Leave zero if only one result.</div></div>')
                     with gr.Row():
-                        b2_dist = gr.Dropdown(DIST_KEYS, label="Distance", value=_b2_dist_saved)
-                        b2_h    = gr.Number(label="h",   value=_b2_h, precision=0, minimum=0, maximum=5)
-                        b2_m    = gr.Number(label="min", value=_b2_m, precision=0, minimum=0, maximum=59)
-                        b2_s    = gr.Number(label="sec", value=_b2_s, precision=0, minimum=0, maximum=59)
+                        b2_dist    = gr.Dropdown(DIST_KEYS, label="Distance", value=_b2_dist_saved)
+                        b2_h       = gr.Number(label="h",   value=_b2_h, precision=0, minimum=0, maximum=5)
+                        b2_m       = gr.Number(label="min", value=_b2_m, precision=0, minimum=0, maximum=59)
+                        b2_s       = gr.Number(label="sec", value=_b2_s, precision=0, minimum=0, maximum=59)
+                        b2_date_in = gr.Textbox(label="Date (YYYY-MM-DD)", value=_b2_date_saved,
+                                                placeholder="2025-01-10", scale=2)
 
                     gr.HTML('<div class="section-label"><div class="section-label-text">Physical status</div></div>')
                     with gr.Row():
@@ -1173,7 +1513,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         value=_saved_run_days,
                     )
 
-                    gr.HTML('<div class="section-label"><div class="section-label-text">LRP club sessions</div><div class="section-label-sub">Locked into the plan · add up to 2</div></div>')
+                    gr.HTML('<div class="section-label"><div class="section-label-text">Club / group run sessions</div><div class="section-label-sub">Locked into the plan · up to 4 sessions · not all need to be LRP</div></div>')
 
                     # Session 1 (always shown)
                     with gr.Row():
@@ -1183,8 +1523,11 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         lrp1_type_in = gr.Radio(["easy", "tempo", "long"], label="Type",
                                                  value=_lrp1_type)
 
-                    # Session 2 (toggle)
+                    # Sessions 2–4 (chained toggles — 3 and 4 live inside 2's group)
                     lrp2_visible_state = gr.State(value=_has_lrp2)
+                    lrp3_visible_state = gr.State(value=_has_lrp3)
+                    lrp4_visible_state = gr.State(value=_has_lrp4)
+
                     with gr.Group(visible=_has_lrp2, elem_id="lrp-session2") as lrp2_group:
                         with gr.Row():
                             lrp2_day_in  = gr.Dropdown(["None"] + WEEKDAY_LABELS, label="Session 2 — day",
@@ -1194,7 +1537,31 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                                                      value=_lrp2_type)
                         remove_lrp2_btn = gr.Button("✕ Remove session 2", size="sm", variant="secondary")
 
-                    add_lrp2_btn = gr.Button("+ Add second club session", size="sm",
+                        with gr.Group(visible=_has_lrp3, elem_id="lrp-session3") as lrp3_group:
+                            with gr.Row():
+                                lrp3_day_in  = gr.Dropdown(["None"] + WEEKDAY_LABELS, label="Session 3 — day",
+                                                            value=_lrp3_day)
+                                lrp3_km_in   = gr.Number(label="km", value=_lrp3_km, minimum=3, maximum=35)
+                                lrp3_type_in = gr.Radio(["easy", "tempo", "long"], label="Type",
+                                                         value=_lrp3_type)
+                            remove_lrp3_btn = gr.Button("✕ Remove session 3", size="sm", variant="secondary")
+
+                            with gr.Group(visible=_has_lrp4, elem_id="lrp-session4") as lrp4_group:
+                                with gr.Row():
+                                    lrp4_day_in  = gr.Dropdown(["None"] + WEEKDAY_LABELS, label="Session 4 — day",
+                                                                value=_lrp4_day)
+                                    lrp4_km_in   = gr.Number(label="km", value=_lrp4_km, minimum=3, maximum=35)
+                                    lrp4_type_in = gr.Radio(["easy", "tempo", "long"], label="Type",
+                                                             value=_lrp4_type)
+                                remove_lrp4_btn = gr.Button("✕ Remove session 4", size="sm", variant="secondary")
+
+                            add_lrp4_btn = gr.Button("+ Add 4th session", size="sm",
+                                                      variant="secondary", visible=not _has_lrp4)
+
+                        add_lrp3_btn = gr.Button("+ Add 3rd session", size="sm",
+                                                  variant="secondary", visible=not _has_lrp3)
+
+                    add_lrp2_btn = gr.Button("+ Add 2nd session", size="sm",
                                               variant="secondary", visible=not _has_lrp2,
                                               elem_id="add-lrp2-btn")
 
@@ -1223,16 +1590,65 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         </div>
                     </div>
                 """)
-                gr.HTML('<div class="section-label"><div class="section-label-text">Add runs</div></div>')
-                hist_files = gr.File(file_count="multiple", file_types=[".fit"], label="FIT files")
-                with gr.Row():
-                    hist_btn       = gr.Button("Add to history", variant="primary")
-                    hist_clear_btn = gr.Button("Clear all history", variant="stop")
-                hist_msg = gr.Textbox(label="Status", interactive=False)
+                with gr.Row(equal_height=False):
+                    # Left column — manual FIT upload
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-label"><div class="section-label-text">Manual upload</div></div>')
+                        hist_files = gr.File(file_count="multiple", file_types=[".fit"], label="FIT files")
+                        with gr.Row():
+                            hist_btn       = gr.Button("Add to history", variant="primary")
+                            hist_clear_btn = gr.Button("Clear all history", variant="stop")
+                        hist_msg = gr.Textbox(label="Status", interactive=False)
+
+                    # Right column — Garmin Connect
+                    with gr.Column(scale=1):
+                        gr.HTML('<div class="section-label"><div class="section-label-text">Garmin Connect</div><div class="section-label-sub">Sync automatically · password never stored</div></div>')
+                        garmin_status = gr.HTML(_garmin_status_html(False, None))
+                        with gr.Group(visible=True, elem_id="garmin-connect-form") as garmin_form:
+                            garmin_email_in = gr.Textbox(label="Garmin email", placeholder="you@example.com")
+                            garmin_pass_in  = gr.Textbox(label="Password", type="password")
+                            garmin_conn_btn = gr.Button("Connect", variant="primary")
+                        with gr.Group(visible=False, elem_id="garmin-mfa-row") as garmin_mfa_group:
+                            garmin_mfa_in  = gr.Textbox(label="Verification code", placeholder="6-digit code from your email")
+                            garmin_mfa_btn = gr.Button("Submit code", variant="primary")
+                        with gr.Group(visible=False, elem_id="garmin-synced") as garmin_synced_group:
+                            with gr.Row():
+                                garmin_import_btn     = gr.Button("Import last 30 days", variant="primary")
+                                garmin_sync_btn       = gr.Button("Sync new (3 days)", variant="secondary")
+                            garmin_autosync_in  = gr.Checkbox(label="Auto-sync daily at 07:00", value=False)
+                            garmin_next_run_out = gr.HTML("")
+                            garmin_disconnect_btn = gr.Button("Disconnect", variant="stop", size="sm")
+                        garmin_msg = gr.Textbox(label="Status", interactive=False)
+
                 gr.HTML('<div class="section-label"><div class="section-label-text">Run log</div></div>')
                 hist_df  = gr.Dataframe(label="", wrap=True)
+
+                _garmin_outputs = [garmin_status, garmin_form, garmin_mfa_group,
+                                   garmin_synced_group, garmin_autosync_in, garmin_next_run_out]
+
                 hist_btn.click(process_history, inputs=hist_files, outputs=[hist_df, hist_msg])
                 hist_clear_btn.click(clear_history, outputs=[hist_df, hist_msg])
+                garmin_conn_btn.click(
+                    garmin_connect_ui,
+                    inputs=[garmin_email_in, garmin_pass_in],
+                    outputs=_garmin_outputs + [garmin_msg],
+                )
+                garmin_mfa_btn.click(
+                    garmin_mfa_ui,
+                    inputs=[garmin_email_in, garmin_pass_in, garmin_mfa_in],
+                    outputs=_garmin_outputs + [garmin_msg],
+                )
+                garmin_disconnect_btn.click(
+                    garmin_disconnect_ui,
+                    outputs=_garmin_outputs + [garmin_msg],
+                )
+                garmin_import_btn.click(garmin_import_ui, outputs=[hist_df, garmin_msg])
+                garmin_sync_btn.click(garmin_sync_new_ui, outputs=[hist_df, garmin_msg])
+                garmin_autosync_in.change(
+                    garmin_autosync_toggle,
+                    inputs=[garmin_autosync_in],
+                    outputs=[garmin_next_run_out, garmin_msg],
+                )
 
             # Panel 3 — Adjustments
             with gr.Group(visible=False, elem_id="panel-adj") as panel_adj:
@@ -1299,7 +1715,9 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
 
                 checkin_files = gr.File(file_count="multiple", file_types=[".fit"],
                                         label="FIT files for this week")
-                checkin_btn   = gr.Button("Analyse week & get coaching note", variant="primary")
+                checkin_btn = gr.Button("Analyse week & get coaching note", variant="primary")
+                gr.HTML("<div style='text-align:center;color:#9CA3AF;font-size:12px;margin:2px 0'>— or —</div>")
+                checkin_history_btn = gr.Button("Use synced Garmin history for this week", variant="secondary")
 
                 gr.HTML('<div class="section-label"><div class="section-label-text">Performance assessment</div></div>')
                 checkin_json = gr.JSON(label="")
@@ -1311,6 +1729,11 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 checkin_btn.click(
                     checkin,
                     inputs=[checkin_week, checkin_files, feeling_in, prev_hr_in],
+                    outputs=[checkin_json, coaching_out, checkin_plan_out],
+                )
+                checkin_history_btn.click(
+                    checkin_from_history,
+                    inputs=[checkin_week, feeling_in, prev_hr_in],
                     outputs=[checkin_json, coaching_out, checkin_plan_out],
                 )
 
@@ -1331,14 +1754,36 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
         outputs=[setup_summary, setup_form],
     )
 
-    # ── LRP session 2 add / remove ────────────────────────────────────────
+    # ── Club session add / remove wiring ─────────────────────────────────────
     add_lrp2_btn.click(
         lambda: (gr.update(visible=True), gr.update(visible=False), True),
         outputs=[lrp2_group, add_lrp2_btn, lrp2_visible_state],
     )
     remove_lrp2_btn.click(
+        lambda: (gr.update(visible=False), gr.update(visible=True), False,
+                 gr.update(visible=False), gr.update(visible=True), False,
+                 gr.update(visible=False), gr.update(visible=True), False),
+        outputs=[lrp2_group, add_lrp2_btn, lrp2_visible_state,
+                 lrp3_group, add_lrp3_btn, lrp3_visible_state,
+                 lrp4_group, add_lrp4_btn, lrp4_visible_state],
+    )
+    add_lrp3_btn.click(
+        lambda: (gr.update(visible=True), gr.update(visible=False), True),
+        outputs=[lrp3_group, add_lrp3_btn, lrp3_visible_state],
+    )
+    remove_lrp3_btn.click(
+        lambda: (gr.update(visible=False), gr.update(visible=True), False,
+                 gr.update(visible=False), gr.update(visible=True), False),
+        outputs=[lrp3_group, add_lrp3_btn, lrp3_visible_state,
+                 lrp4_group, add_lrp4_btn, lrp4_visible_state],
+    )
+    add_lrp4_btn.click(
+        lambda: (gr.update(visible=True), gr.update(visible=False), True),
+        outputs=[lrp4_group, add_lrp4_btn, lrp4_visible_state],
+    )
+    remove_lrp4_btn.click(
         lambda: (gr.update(visible=False), gr.update(visible=True), False),
-        outputs=[lrp2_group, add_lrp2_btn, lrp2_visible_state],
+        outputs=[lrp4_group, add_lrp4_btn, lrp4_visible_state],
     )
 
     # ── Generate button ────────────────────────────────────────────────────
@@ -1353,12 +1798,14 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
         inputs=[
             name_in, goal_race_in, marathon_date_in,
             goal_h, goal_m, goal_s,
-            b1_dist, b1_h, b1_m, b1_s,
-            b2_dist, b2_h, b2_m, b2_s,
+            b1_dist, b1_h, b1_m, b1_s, b1_date_in,
+            b2_dist, b2_h, b2_m, b2_s, b2_date_in,
             injury_in, injury_notes_in,
             run_days_in,
             lrp1_day_in, lrp1_km_in, lrp1_type_in,
             lrp2_day_in, lrp2_km_in, lrp2_type_in, lrp2_visible_state,
+            lrp3_day_in, lrp3_km_in, lrp3_type_in, lrp3_visible_state,
+            lrp4_day_in, lrp4_km_in, lrp4_type_in, lrp4_visible_state,
             strength_in, cycling_in,
         ],
         outputs=[zones_out, plan_df, gen_msg, profile_summary_html,
@@ -1369,6 +1816,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
     demo.load(load_status_on_start,  outputs=status_bar)
     demo.load(load_plan_on_start,    outputs=plan_df)
     demo.load(load_history_on_start, outputs=hist_df)
+    demo.load(load_garmin_ui,        outputs=_garmin_outputs)
 
 
 if __name__ == "__main__":
