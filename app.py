@@ -1344,6 +1344,14 @@ body, .gradio-container {
     margin: 0 0 8px 0 !important;
 }
 
+/* ── Form element labels — force dark text, not subdued grey ─ */
+#content-area .block label,
+#content-area .block label span,
+#content-area .block .wrap span,
+#content-area .block .head span {
+    color: #374151 !important;
+}
+
 /* ── Primary action buttons (in content) ─────────── */
 #content-area button.lg.primary,
 #content-area button.primary {
