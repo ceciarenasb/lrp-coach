@@ -279,7 +279,7 @@ def propose_week(
 
     def _easy_hr(runs):
         hrs = [r["avg_hr"] for r in runs
-               if r.get("avg_hr") and r.get("avg_pace_s", 0) > 330]
+               if r.get("avg_hr") and (r.get("avg_pace_s") or 0) > 330]
         return sum(hrs) / len(hrs) if hrs else None
 
     easy_hr   = _easy_hr(recent)

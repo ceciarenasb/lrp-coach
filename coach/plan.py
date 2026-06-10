@@ -67,7 +67,9 @@ def _peak_km(goal_s: int) -> float:
     if h <= 3.0:  return 90.0
     if h <= 3.5:  return 78.0
     if h <= 4.0:  return 65.0
-    return 55.0
+    if h <= 4.5:  return 62.0
+    if h <= 5.0:  return 57.0
+    return 50.0
 
 
 def _long_run_km(wk: int, total: int) -> float:
@@ -164,88 +166,123 @@ def _medium_long(km: float, phase: str, z: Zones) -> Session:
     )
 
 
-def _quality(phase: str, wk: int, z: Zones, injury: str, q_num: int = 1) -> Session:
+def _quality(phase: str, wk: int, z: Zones, injury: str, q_num: int = 1, phase_wk: int = 1) -> Session:
+    """Quality session — cycle driven by phase_wk so Build always starts with VO₂max."""
     if injury == "moderate":
         return _easy(10, z)
 
-    cycle = wk % 3  # rotate through 3 session variants per phase
+    cycle = (phase_wk - 1) % 4
 
     if phase == "Base":
-        variants = [
+        # From week 2: alternate short intervals and threshold work
+        base_cycle = (phase_wk - 2) % 4
+        base_variants = [
+            Session(SVC_INTERVAL,
+                "Short intervals — 2 km WU + 6×400 m at I-pace (90 s walk recovery) + 3 km CD",
+                distance_km=10.0,
+                targets={"I-pace": fmt_pace(z.interval), "recovery": "90 s walk"}),
             Session(TEMPO,
-                "Tempo — 2 km WU + 2×15 min at T-pace (2 min jog) + 2 km CD",
+                "Cruise intervals — 2 km WU + 5×1000 m at T-pace (60 s jog) + 2 km CD",
                 distance_km=11.0,
-                targets={"T-pace": fmt_pace(z.threshold), "WU/CD_pace": fmt_pace(z.easy_hi)}),
-            Session(TEMPO,
-                "Cruise intervals — 2 km WU + 5×1 km at T-pace (60 s jog) + 2 km CD",
-                distance_km=10.0,
                 targets={"T-pace": fmt_pace(z.threshold), "recovery": "60 s jog"}),
-            Session(TEMPO,
-                "Tempo — 2 km WU + 20 min continuous at T-pace + 2 km CD",
-                distance_km=10.0,
-                targets={"T-pace": fmt_pace(z.threshold)}),
+            Session(SVC_INTERVAL,
+                "Short intervals — 2 km WU + 5×600 m at I-pace (90 s jog) + 3 km CD",
+                distance_km=11.0,
+                targets={"I-pace": fmt_pace(z.interval), "recovery": "90 s jog"}),
+            Session(PROGRESSION,
+                "Progression — 5 km easy + 5 km at M-pace + 3 km at T-pace + 1 km CD",
+                distance_km=14.0,
+                targets={"M-pace": fmt_pace(z.marathon), "T-pace": fmt_pace(z.threshold)}),
         ]
-        return variants[cycle]
+        return base_variants[base_cycle]
 
     if phase == "Build":
         if q_num == 2:
-            # Second quality in Build = medium aerobic with strides
-            return Session(EASY,
-                "General aerobic 13 km + 8×100 m strides — steady effort, Z2 heart rate",
-                distance_km=13.0,
-                targets={"pace": f"{fmt_pace(z.easy_hi)} – {fmt_pace(z.marathon)}", "strides": "near 5 K effort"})
-        variants = [
+            return Session(MP_RUN,
+                "M-pace block — 2 km WU + 10 km at M-pace + 2 km CD",
+                distance_km=14.0,
+                targets={"M-pace": fmt_pace(z.marathon), "WU/CD": fmt_pace(z.easy_hi)})
+        # cycle 0 = first week of Build → VO₂max intervals from day 1
+        build_variants = [
             Session(SVC_INTERVAL,
-                "SVC Intervals — 3 km WU + 5×1000 m at SVC pace (90 s jog) + 2 km CD",
+                "VO₂max intervals — 3 km WU + 6×800 m at I-pace (90 s jog) + 2 km CD",
                 distance_km=12.0,
-                targets={"SVC-pace": fmt_pace(z.cv_interval), "recovery": "90 s jog"}),
+                targets={"I-pace": fmt_pace(z.interval), "recovery": "90 s jog"}),
             Session(TEMPO,
-                "Threshold — 3 km WU + 2×20 min at T-pace (2 min jog) + 2 km CD",
-                distance_km=13.0,
+                "Lactate threshold — 3 km WU + 2×15 min at T-pace (2 min jog) + 2 km CD",
+                distance_km=12.0,
                 targets={"T-pace": fmt_pace(z.threshold)}),
             Session(SVC_INTERVAL,
-                "VO₂max — 3 km WU + 6×800 m at I-pace (2 min jog) + 2 km CD",
-                distance_km=12.0,
+                "VO₂max intervals — 3 km WU + 5×1200 m at I-pace (2 min jog) + 2 km CD",
+                distance_km=13.0,
                 targets={"I-pace": fmt_pace(z.interval), "recovery": "2 min jog"}),
+            Session(MP_RUN,
+                "M-pace run — 3 km WU + 10 km at M-pace + 2 km CD",
+                distance_km=15.0,
+                targets={"M-pace": fmt_pace(z.marathon), "WU/CD": fmt_pace(z.easy_hi)}),
         ]
-        return variants[cycle]
+        return build_variants[cycle]
 
     if phase == "Peak":
         if q_num == 2:
             return Session(PROGRESSION,
-                "Progression run 16 km — 6 km easy, 6 km at M-pace, 4 km at T-pace",
+                "Progression run — 4 km easy + 6 km at M-pace + 4 km at T-pace + 2 km CD",
                 distance_km=16.0,
                 targets={
-                    "easy_section": fmt_pace(z.easy_hi),
-                    "M-pace_section": fmt_pace(z.marathon),
-                    "T-pace_section": fmt_pace(z.threshold),
+                    "easy": fmt_pace(z.easy_hi),
+                    "M-pace": fmt_pace(z.marathon),
+                    "T-pace": fmt_pace(z.threshold),
                 })
-        variants = [
+        peak_variants = [
             Session(SVC_INTERVAL,
-                "SVC Intervals — 3 km WU + 6×1000 m at SVC pace (75 s jog) + 2 km CD",
-                distance_km=13.0,
-                targets={"SVC-pace": fmt_pace(z.cv_interval), "recovery": "75 s jog"}),
+                "VO₂max race-prep — 3 km WU + 4×1600 m at I-pace (2 min jog) + 2 km CD",
+                distance_km=15.0,
+                targets={"I-pace": fmt_pace(z.interval), "recovery": "2 min jog"}),
             Session(MP_RUN,
-                "Race-specific — 3 km WU + 16 km at marathon pace + 2 km CD",
-                distance_km=21.0,
+                "Race simulation — 3 km WU + 14 km at M-pace + 3 km easy",
+                distance_km=20.0,
                 targets={"M-pace": fmt_pace(z.marathon)}),
+            Session(SVC_INTERVAL,
+                "Sharpener — 3 km WU + 5×1000 m at I-pace (90 s jog) + 2 km CD",
+                distance_km=12.0,
+                targets={"I-pace": fmt_pace(z.interval), "recovery": "90 s jog"}),
             Session(TEMPO,
-                "Threshold — 3 km WU + 2×20 min at T-pace (90 s jog) + 2 km CD",
-                distance_km=13.0,
+                "Threshold top-up — 3 km WU + 2×15 min at T-pace (2 min jog) + 2 km CD",
+                distance_km=12.0,
                 targets={"T-pace": fmt_pace(z.threshold)}),
         ]
-        return variants[cycle]
+        return peak_variants[cycle]
 
-    # Taper
-    if cycle == 0:
+    # Taper — short and sharp
+    if cycle % 2 == 0:
         return Session(MP_RUN,
-            "Taper sharpener — 2 km WU + 20 min at marathon pace + 2 km CD",
+            "Taper sharpener — 2 km WU + 20 min at M-pace + 2 km CD",
             distance_km=9.0,
             targets={"M-pace": fmt_pace(z.marathon)})
     return Session(TEMPO,
         "Taper tune-up — 2 km WU + 4×1 km at T-pace (90 s jog) + 2 km CD",
         distance_km=9.0,
         targets={"T-pace": fmt_pace(z.threshold)})
+
+
+def _lrp_sat_quality(phase: str, phase_wk: int, z: Zones) -> Session:
+    """Saturday quality override — distinct workout for each override within a phase."""
+    if phase == "Build":
+        if phase_wk % 6 == 3:  # first override in Build (week 3 of Build)
+            return Session(MP_RUN,
+                "LRP Sat quality — 3 km WU + 12 km at M-pace + 3 km CD",
+                distance_km=18.0,
+                targets={"M-pace": fmt_pace(z.marathon), "WU/CD": fmt_pace(z.easy_hi)})
+        # second override (week 6 of Build) — progression, harder
+        return Session(PROGRESSION,
+            "LRP Sat quality — 3 km easy + 8 km at M-pace + 5 km at T-pace + 2 km CD",
+            distance_km=18.0,
+            targets={"M-pace": fmt_pace(z.marathon), "T-pace": fmt_pace(z.threshold)})
+    # Peak — VO₂max race-prep (phase_wk == 2)
+    return Session(SVC_INTERVAL,
+        "LRP Sat quality — 3 km WU + 8×1000 m at I-pace (90 s jog) + 2 km CD",
+        distance_km=15.0,
+        targets={"I-pace": fmt_pace(z.interval), "recovery": "90 s jog"})
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +293,7 @@ def _build_week(
     week_start: date, wk: int, total: int, phase: str, zones: Zones,
     target_km: float, run_days: list, lrp_sessions: list,
     strength_days: list, cycling_days: list, injury: str,
+    phase_wk: int = 1,
 ) -> list:
     sessions: dict[int, Session] = {}
 
@@ -287,31 +325,58 @@ def _build_week(
         return " + ".join(_xtra.get(d, []))
 
     # 1. Lock LRP club sessions
+    lrp_long_day: Optional[int] = None
     for s in lrp_sessions:
         day = s.get("day")
         if day is None:
             continue
-        km    = float(s.get("km", 12.0))
         stype = s.get("type", "easy")
-        if stype == "tempo":
-            pace_target = fmt_pace(zones.threshold)
-        elif stype == "long":
-            pace_target = fmt_pace(zones.easy_lo)
-        else:
-            pace_target = fmt_pace(zones.easy_hi)
-        note = _note(day)
+        note  = _note(day)
         extra = f" + {note}" if note else ""
-        sessions[day] = Session(
-            CLUB_RUN,
-            f"LRP club run — {km:.0f} km ({stype}){extra}",
-            distance_km=km,
-            targets={"pace": pace_target},
-        )
 
-    # 2. Long run — prefer Sunday, otherwise latest calendar day
-    long_day = 6 if 6 in run_days else max(run_days, key=_off)
-    if long_day not in sessions:
-        sessions[long_day] = _long(_long_run_km(wk, total), phase, zones)
+        if stype == "long":
+            lrp_long_day = day
+            # Quality override at phase weeks 3 & 6 (Build) or week 2 (Peak) — not every week
+            _sat_override = (
+                phase == "Build" and phase_wk % 3 == 0
+            ) or (
+                phase == "Peak" and phase_wk == 2
+            )
+            if _sat_override:
+                sessions[day] = _lrp_sat_quality(phase, phase_wk, zones)
+            else:
+                # Use caller-supplied km if non-zero (decide.py passes user's override);
+                # fall back to periodised suggestion when km is 0/None (plan generation).
+                km_passed = float(s.get("km") or 0)
+                km = km_passed if km_passed > 0 else _long_run_km(wk, total)
+                sessions[day] = Session(
+                    CLUB_RUN,
+                    f"LRP Sat long run — {km:.0f} km suggested (easy aerobic){extra}",
+                    distance_km=km,
+                    targets={
+                        "easy_pace":    f"{fmt_pace(zones.easy_lo)} – {fmt_pace(zones.easy_hi)}",
+                        "adjust":       "adapt to how you feel on the day",
+                    },
+                )
+        else:
+            km = float(s.get("km", 12.0))
+            pace_target = fmt_pace(zones.threshold) if stype == "tempo" else fmt_pace(zones.easy_hi)
+            sessions[day] = Session(
+                CLUB_RUN,
+                f"LRP club run — {km:.0f} km ({stype}){extra}",
+                distance_km=km,
+                targets={"pace": pace_target},
+            )
+
+    # 2. Long run — skipped when LRP Saturday covers it; otherwise weekends only
+    if lrp_long_day is not None:
+        long_day = lrp_long_day
+    else:
+        # Never put a standalone long run on a weekday
+        weekend = [d for d in run_days if d in (5, 6)]
+        long_day = 6 if 6 in run_days else (5 if 5 in run_days else max(run_days, key=_off))
+        if long_day not in sessions:
+            sessions[long_day] = _long(_long_run_km(wk, total), phase, zones)
 
     # 3. Day before long run → easy/recovery if it's a run day
     long_off = _off(long_day)
@@ -322,9 +387,12 @@ def _build_week(
             break
 
     def _hard_days_so_far():
-        return {d for d, s in sessions.items() if s.type in _HARD}
+        # Include Club Run days so quality sessions are spaced away from LRP runs too
+        return {d for d, s in sessions.items() if s.type in _HARD or s.type == CLUB_RUN}
 
-    def _place_first_free(candidate_fn, min_dist: int = 2):
+    def _place_first_free(candidate_fn, min_dist: int = 2, strict: bool = False):
+        """Place candidate on first available run day ≥ min_dist from any hard/club day.
+        strict=True: never fall back below min_dist (session is skipped if no good slot)."""
         hard_placed = _hard_days_so_far()
         for d in run_days_cal:
             if d in sessions:
@@ -332,21 +400,23 @@ def _build_week(
             if not hard_placed or all(_day_dist(d, h) >= min_dist for h in hard_placed):
                 sessions[d] = candidate_fn(d)
                 return True
-        if min_dist > 1:
-            return _place_first_free(candidate_fn, min_dist - 1)
+        if min_dist > 1 and not strict:
+            return _place_first_free(candidate_fn, min_dist - 1, strict=False)
         return False
 
-    # 4. Primary quality session
-    _place_first_free(lambda _: _quality(phase, wk, zones, injury, 1))
+    # 4. Primary quality session — skip Base week 1 to let the body adapt first
+    _pw = phase_wk
+    if not (phase == "Base" and phase_wk == 1):
+        _place_first_free(lambda _, pw=_pw: _quality(phase, wk, zones, injury, 1, pw))
 
-    # 5. Medium-long run in Build/Peak with ≥4 run days
+    # 5. Second quality in Build/Peak with ≥4 run days — must fit; skip if no clean slot
+    if phase in ("Build", "Peak") and len(run_days) >= 4:
+        _place_first_free(lambda _, pw=_pw: _quality(phase, wk, zones, injury, 2, pw), strict=True)
+
+    # 6. Medium-long run in Build/Peak — strict: skip rather than land on adjacent day
     if phase in ("Build", "Peak") and len(run_days) >= 4:
         ml_km = _medium_long_km(_long_run_km(wk, total))
-        _place_first_free(lambda _: _medium_long(ml_km, phase, zones))
-
-    # 6. Second quality (strides/aerobic) in Build/Peak with ≥5 run days
-    if phase in ("Build", "Peak") and len(run_days) >= 5:
-        _place_first_free(lambda _: _quality(phase, wk, zones, injury, 2))
+        _place_first_free(lambda _: _medium_long(ml_km, phase, zones), strict=True)
 
     # 6. Fill remaining run days
     hard_placed = _hard_days_so_far()
@@ -398,6 +468,7 @@ def generate_plan(
     injury: str = "none",
     start_km: Optional[float] = None,
     runs_per_week: int = 0,
+    max_runs_per_week: int = 0,
     allow_volume_increase: bool = True,
     lrp_day: Optional[int] = None,
     lrp_km: float = 12.0,
@@ -409,8 +480,14 @@ def generate_plan(
     if not lrp_sessions and lrp_day is not None:
         lrp_sessions = [{"day": lrp_day, "km": lrp_km, "type": lrp_type}]
 
-    today = date.today() + timedelta(days=1)
-    weeks = max(4, min(20, (marathon_date - today).days // 7))
+    # M-pace = goal pace, not VDOT-predicted pace — athletes train at their target
+    goal_mp_s = int(goal_time_s / 42.195)
+    if goal_mp_s > zones.marathon:
+        from dataclasses import replace as _dc_replace
+        zones = _dc_replace(zones, marathon=goal_mp_s)
+
+    tomorrow = date.today() + timedelta(days=1)
+    weeks = max(4, min(20, (marathon_date - tomorrow).days // 7))
     peak = _peak_km(goal_time_s)
     base = start_km if start_km else peak * 0.55
 
@@ -426,19 +503,22 @@ def generate_plan(
         if day is not None and day not in run_days:
             run_days = sorted(run_days + [day])
 
-    if runs_per_week and 0 < runs_per_week < len(run_days):
-        lrp_days = [s["day"] for s in lrp_sessions if s.get("day") is not None]
-        non_lrp = [d for d in run_days if d not in lrp_days]
-        slots_left = max(0, runs_per_week - len(lrp_days))
-        if slots_left and non_lrp:
-            step = len(non_lrp) / slots_left
-            extra = [non_lrp[int(i * step)] for i in range(slots_left)]
-        else:
-            extra = []
-        run_days = sorted(set(lrp_days + extra))
+    # Progressive run count: Base=min_runs, Build/Peak ramps to max_runs
+    lrp_days = sorted({s["day"] for s in lrp_sessions if s.get("day") is not None})
+    min_r = max(len(lrp_days), runs_per_week) if runs_per_week else len(run_days)
+    max_r = max_runs_per_week if max_runs_per_week else len(run_days)
+    min_r = min(min_r, len(run_days))
+    max_r = max(min_r, min(max_r, len(run_days)))
+    non_lrp_days = [d for d in run_days if d not in lrp_days]
 
+    # Calendar-align weeks to Mon-Sun: week 1 starts from the Monday
+    # of the week containing tomorrow (may be a partial week).
+    week1_mon = tomorrow - timedelta(days=tomorrow.weekday())
     taper_start = weeks - 3
     plan = []
+
+    prev_phase = None
+    phase_wk_counters: dict = {}
 
     for wk in range(1, weeks + 1):
         pct = wk / weeks
@@ -451,6 +531,11 @@ def generate_plan(
         else:
             phase = "Taper"
 
+        if phase != prev_phase:
+            prev_phase = phase
+        phase_wk_counters[phase] = phase_wk_counters.get(phase, 0) + 1
+        phase_wk = phase_wk_counters[phase]
+
         if wk >= taper_start:
             target_km = max(peak * 0.40, peak * (1 - (wk - taper_start) * 0.22))
         elif not allow_volume_increase:
@@ -458,19 +543,45 @@ def generate_plan(
         else:
             target_km = base + (peak - base) * ((wk - 1) / max(1, taper_start - 1))
 
-        week_start = today + timedelta(weeks=wk - 1)
-        days = _build_week(
+        # Progressive run count per week
+        if max_r > min_r:
+            if phase == "Base":
+                target_r = min_r
+            elif phase in ("Build", "Peak"):
+                pct_bp = max(0.0, (pct - 0.35) / 0.50)
+                target_r = min_r + round((max_r - min_r) * min(1.0, pct_bp))
+            else:
+                target_r = max(min_r, max_r - 1)
+        else:
+            target_r = min_r
+
+        extra_slots = max(0, target_r - len(lrp_days))
+        if extra_slots >= len(non_lrp_days):
+            active_run_days = list(run_days)
+        else:
+            step = len(non_lrp_days) / max(1, extra_slots)
+            extra = [non_lrp_days[int(i * step)] for i in range(extra_slots)]
+            active_run_days = sorted(set(lrp_days + extra))
+
+        week_start = week1_mon + timedelta(weeks=wk - 1)
+        all_days = _build_week(
             week_start, wk, weeks, phase, zones,
-            target_km, list(run_days), lrp_sessions,
+            target_km, active_run_days, lrp_sessions,
             list(strength_days), list(cycling_days), injury,
+            phase_wk=phase_wk,
         )
+
+        # Week 1 may be partial: drop days that are already in the past
+        if wk == 1:
+            all_days = [dp for dp in all_days if dp.date >= tomorrow]
+
         plan.append(WeekPlan(
             week_num=wk,
-            start_date=week_start,
+            start_date=week_start if wk > 1 else tomorrow,
             phase=phase,
             focus=_focus(phase, wk, weeks),
             target_km=round(target_km, 1),
-            days=days,
+            days=all_days,
         ))
 
     return plan
@@ -479,7 +590,7 @@ def generate_plan(
 def _focus(phase: str, wk: int, total: int) -> str:
     taper_wk = wk - (total - 3)
     if phase == "Base":
-        return "Build aerobic base — tempo runs to establish lactate threshold, easy volume"
+        return "Build aerobic base — short intervals and tempo layered onto easy volume"
     if phase == "Build":
         return "Race fitness — SVC intervals, VO₂max work, medium-long runs with M-pace finish"
     if phase == "Peak":

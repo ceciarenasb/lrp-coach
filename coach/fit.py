@@ -37,7 +37,7 @@ def _detect_sport(path: str) -> str:
                     return _FIT_SPORT_MAP.get(sport, "Other")
     except Exception:
         pass
-    return "Run"
+    return "Other"
 
 
 def _parse_records(path: str) -> pd.DataFrame:

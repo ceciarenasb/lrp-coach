@@ -33,7 +33,50 @@ def load() -> dict:
     if "cycles" not in raw:
         raw = _migrate_v1(raw)
         _write(raw)
+    _project_flat_keys(raw)
     return raw
+
+
+def _project_flat_keys(state: dict) -> None:
+    """Populate v1 flat keys in-place from the active cycle (never written to disk)."""
+    cyc = active_cycle(state)
+    athlete = state.get("athlete", {})
+    state["hr_max"]  = athlete.get("hr_max", 177)
+    state["hr_rest"] = athlete.get("hr_rest", 50)
+    if not cyc:
+        return
+    state["zones"] = cyc.get("zones", {})
+    state["plan"]  = cyc.get("plan", [])
+    bmks = cyc.get("benchmarks", [])
+    club_runs = cyc.get("config", {}).get("club_runs", [])
+    lrp_sessions = [
+        {"day": cr["day"],
+         "km": cr.get("distance_km") or cr.get("default_suggested_km") or 10.0,
+         "type": cr.get("type", "easy")}
+        for cr in club_runs
+    ]
+    state["profile"] = {
+        "name":          athlete.get("name", ""),
+        "goal_race":     cyc["race"].get("name", ""),
+        "marathon_date": cyc["race"].get("date", ""),
+        "goal_time_s":   cyc["race"].get("goal_time_s", 0),
+        "injury_level":  cyc.get("config", {}).get("injury_level", "none"),
+        "injury_notes":  cyc.get("config", {}).get("injury_notes", ""),
+        "b1_dist":       bmks[0].get("distance_m", "") if bmks else "",
+        "b1_time_s":     bmks[0].get("time_s", 0)      if bmks else 0,
+        "b1_date":       bmks[0].get("date", "")        if bmks else "",
+        "b2_dist":       bmks[1].get("distance_m", "")  if len(bmks) > 1 else "",
+        "b2_time_s":     bmks[1].get("time_s", 0)       if len(bmks) > 1 else 0,
+        "b2_date":       bmks[1].get("date", "")        if len(bmks) > 1 else "",
+    }
+    cfg = cyc.get("config", {})
+    state["schedule"] = {
+        **cfg,
+        "lrp_sessions":  lrp_sessions,
+        "run_days":      cfg.get("default_run_days", []),
+        "strength_days": cfg.get("strength_days", []),
+        "cycling_days":  cfg.get("cycling_days", []),
+    }
 
 
 def save(data: dict) -> None:
@@ -201,9 +244,13 @@ def _migrate_v1(old: dict) -> dict:
     for i in (1, 2):
         dist = profile.get(f"b{i}_dist")
         ts   = profile.get(f"b{i}_time_s")
-        if dist and ts:
+        try:
+            dist_f = float(dist) if dist else None
+        except (TypeError, ValueError):
+            dist_f = None
+        if dist_f and ts:
             cycle["benchmarks"].append({
-                "distance_m": float(dist),
+                "distance_m": dist_f,
                 "time_s":     float(ts),
                 "date":       profile.get(f"b{i}_date", ""),
             })

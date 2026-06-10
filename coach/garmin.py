@@ -122,24 +122,40 @@ def get_client() -> Optional["Garmin"]:
 # ── Activity sync ──────────────────────────────────────────────────────────
 
 _GARMIN_TYPE_MAP = {
+    # Running
     "running":              "Run",
     "trail_running":        "Run",
     "treadmill_running":    "Run",
     "virtual_run":          "Run",
+    "track_running":        "Run",
+    "ultra_run":            "Run",
+    # Cycling (outdoor)
     "cycling":              "Cycling",
     "road_biking":          "Cycling",
     "mountain_biking":      "Cycling",
     "gravel_cycling":       "Cycling",
+    "e_bike_fitness":       "Cycling",
+    "e_bike_mountain":      "Cycling",
+    # Cycling (indoor / virtual)
     "indoor_cycling":       "Indoor Cycling",
     "virtual_ride":         "Indoor Cycling",
     "spin":                 "Indoor Cycling",
+    "indoor_rowing":        "Indoor Rowing",
+    # Strength / gym
     "strength_training":    "Strength",
     "fitness_equipment":    "Strength",
+    "cardio":               "Strength",
+    "hiit":                 "Strength",
+    "pilates":              "Strength",
+    # Other sports
     "yoga":                 "Yoga",
     "walking":              "Walking",
     "hiking":               "Hiking",
     "swimming":             "Swimming",
     "open_water_swimming":  "Swimming",
+    "elliptical":           "Elliptical",
+    "stair_climbing":       "Stair Climbing",
+    "bouldering":           "Other",
 }
 
 
@@ -184,7 +200,13 @@ def sync_activities(days: int = 30) -> tuple[list[dict], str]:
             )
             record = _parse_fit_from_zip(zip_data, fit_summarize)
             if record:
-                record.setdefault("activity_type", _garmin_activity_type(act))
+                # Garmin API type is more reliable than FIT sport-frame detection;
+                # use it whenever it resolves to a known type (not "Other").
+                api_type = _garmin_activity_type(act)
+                if api_type != "Other":
+                    record["activity_type"] = api_type
+                else:
+                    record.setdefault("activity_type", "Other")
                 records.append(record)
         except Exception as exc:
             errors.append(act_name)
