@@ -1522,7 +1522,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                         garmin_disconnect_s = gr.Button("Disconnect", size="sm", variant="secondary")
                 garmin_msg_s = gr.HTML()
 
-                gen_btn = gr.Button("💾  Save &amp; Generate Plan", variant="primary", size="lg")
+                gen_btn = gr.Button("💾  Save & Generate Plan", variant="primary", size="lg")
                 gen_msg = gr.HTML()
                 zones_out = gr.JSON(label="Training Zones", visible=False)
 
@@ -1627,7 +1627,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                                             info="Pin the Saturday LRP distance — leave blank to use the plan suggestion")
                 adj_msg_in      = gr.Textbox(label="Message to coach (optional)", lines=2,
                                              placeholder="e.g. I have a race next weekend / travelling / physio said rest")
-                adj_btn         = gr.Button("Apply &amp; get coaching note", variant="primary")
+                adj_btn         = gr.Button("Apply & get coaching note", variant="primary")
                 adj_note_out    = gr.Textbox(label="Coaching note", lines=8, interactive=False)
                 adj_status_out  = gr.HTML()
 
