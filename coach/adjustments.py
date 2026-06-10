@@ -7,12 +7,12 @@ Rules decide what changes; the LLM explains why and coaches through it.
 from __future__ import annotations
 
 from .plan import (
-    CLUB_RUN, EASY, MP_RUN, RECOVERY, REST,
-    SVC_INTERVAL, TEMPO,
+    CLUB_RUN, EASY, MEDIUM_LONG, MP_RUN, PROGRESSION,
+    RECOVERY, REST, SVC_INTERVAL, TEMPO,
 )
 from .zones import Zones, fmt_pace
 
-QUALITY_TYPES = {TEMPO, SVC_INTERVAL, MP_RUN}
+QUALITY_TYPES = {TEMPO, SVC_INTERVAL, MP_RUN, PROGRESSION, MEDIUM_LONG}
 
 
 def apply(

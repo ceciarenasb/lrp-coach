@@ -107,6 +107,7 @@ def summarize(path: str) -> dict | None:
             "hr_drift_pct":       hr_drift,
             "avg_cadence_spm":    avg_cadence,
             "elevation_gain_m":   int(elevation_gain_m) if elevation_gain_m is not None else None,
+            "training_load":      None,   # populated by load.py after parsing
         }
     except Exception as exc:
         return {"error": str(exc), "date": "unknown", "distance_km": 0}

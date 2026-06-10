@@ -205,7 +205,7 @@ def test_sync_activities_returns_empty_when_no_runs():
         mock_get.return_value = client
         records, msg = garmin.sync_activities(days=7)
     assert records == []
-    assert "No running activities" in msg
+    assert "No activities found" in msg
 
 
 def test_sync_activities_returns_parsed_records():
@@ -221,7 +221,7 @@ def test_sync_activities_returns_parsed_records():
         records, msg = garmin.sync_activities(days=7)
     assert len(records) == 1
     assert records[0]["date"] == "2026-06-01"
-    assert "Synced 1 run" in msg
+    assert "Synced 1 activity" in msg
 
 
 def test_sync_activities_skips_unparseable_activities():
@@ -236,7 +236,7 @@ def test_sync_activities_skips_unparseable_activities():
         mock_get.return_value = client
         records, msg = garmin.sync_activities(days=7)
     assert records == []
-    assert "Synced 0 runs" in msg
+    assert "Synced 0 activities" in msg
 
 
 def test_sync_activities_reports_skipped_on_download_error():
