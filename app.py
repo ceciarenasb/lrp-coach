@@ -405,8 +405,18 @@ def _plan_week_html(plan: list, week_idx: int, hr_max: int = 177, hr_rest: int =
         sess   = day["session_type"]
         desc   = day["description"]
         km     = f"{day['distance_km']:.0f} km" if day.get("distance_km") else "—"
-        tgts   = " · ".join(f"{k}: {v}" for k, v in day.get("targets", {}).items())
-        detail = f"{desc}<br><span style='color:#9CA3AF;font-size:11px'>{tgts}</span>" if tgts else desc
+        _PACE_COLOR = {
+            "M-pace": "#1B2874", "T-pace": "#F5871F", "I-pace": "#DC2626",
+            "Easy section": "#16A34A", "Finish at": "#1B2874",
+            "WU/CD": "#6B7280", "recovery": "#6B7280",
+        }
+        def _chip(k, v):
+            c = _PACE_COLOR.get(k, "#6B7280")
+            return (f"<span style='display:inline-block;margin:3px 4px 0 0;padding:2px 7px;"
+                    f"border-radius:99px;font-size:10px;font-weight:700;color:#fff;"
+                    f"background:{c}'>{k}: {v}</span>")
+        chips = "".join(_chip(k, v) for k, v in day.get("targets", {}).items())
+        detail = f"{desc}<br>{chips}" if chips else desc
         bg     = "#fff" if i % 2 == 0 else "#FAFAFA"
         badge  = _SESSION_COLOR.get(sess, "#6B7280")
         hr_txt = _session_hr_text(sess, desc, zones_hr)
