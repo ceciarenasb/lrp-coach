@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+VERSION = "1.0"
+
 from datetime import date, datetime, timedelta
 
 import gradio as gr
@@ -1303,6 +1305,15 @@ input.svelte-1scun43, input.svelte-1sk0pyu { color: #111827 !important; }
 #content-area button.lg.primary:hover, #content-area button.primary:hover {
     background: #df7318 !important; border-color: #df7318 !important;
 }
+#app-footer {
+    text-align: center;
+    font-size: 11px;
+    color: #9CA3AF;
+    padding: 18px 0 8px;
+    margin-top: 24px;
+    border-top: 1px solid #E5E7EB;
+    letter-spacing: 0.04em;
+}
 """
 
 # ── Theme ──────────────────────────────────────────────────────────────────
@@ -1705,6 +1716,8 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 zones_pace_out = gr.HTML()
                 gr.HTML('<div class="section-label"><div class="section-label-text">Heart rate zones</div></div>')
                 zones_hr_out = gr.HTML()
+
+            gr.HTML(f'<div id="app-footer">LRP Coach · v{VERSION}</div>')
 
     # ── Nav wiring ─────────────────────────────────────────────────────────
     _panels = [panel_plan, panel_setup, panel_history, panel_adj, panel_checkin, panel_zones]
