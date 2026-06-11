@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 import gradio as gr
 import pandas as pd
 
+from coach import debrief as debrief_mod
 from coach import fit as fit_mod
 from coach import garmin as garmin_mod
 from coach import llm as llm_mod
@@ -482,19 +483,477 @@ def render_plan_week(week_idx: int) -> str:
     return _plan_week_html(plan, int(week_idx or 0), s.get("hr_max", 177), s.get("hr_rest", 50))
 
 
+_RATING_COLOR = {
+    debrief_mod.RATING_SUCCESSFUL: "#16A34A",
+    debrief_mod.RATING_MODERATE:   "#F59E0B",
+    debrief_mod.RATING_PARTIAL:    "#F97316",
+    debrief_mod.RATING_MISSED:     "#DC2626",
+    debrief_mod.RATING_EXTRA:      "#7C3AED",
+    debrief_mod.RATING_REST:       "#9CA3AF",
+}
+_WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _run_debrief(week_days: list, history: list, zones_d: dict,
+                 rpe_map: dict, comment_map: dict) -> list:
+    """Run match + rate for all sessions; rpe_map/comment_map keyed by date ISO."""
+    matched  = debrief_mod.match_week(week_days, history)
+    debriefs = []
+    for planned, actual in matched:
+        date_str = (planned or actual or {}).get("date", "")
+        rpe      = rpe_map.get(date_str)
+        comment  = comment_map.get(date_str, "")
+        debriefs.append(debrief_mod.rate_session(planned, actual, zones_d, rpe=rpe, comment=comment))
+    return debriefs
+
+
+def _render_session_cards(debriefs: list) -> str:
+    """Render per-session debrief cards as HTML."""
+    if not debriefs:
+        return ""
+    parts = []
+    for d in debriefs:
+        if d.rating == debrief_mod.RATING_REST:
+            continue
+        color = _RATING_COLOR.get(d.rating, "#6B7280")
+        badge_color = _SESSION_COLOR.get(d.session_type, "#6B7280")
+
+        # Plan vs actual line
+        actual_line = ""
+        if d.actual:
+            km   = d.actual.get("distance_km") or 0
+            pace = d.actual.get("avg_pace_s")
+            hr   = d.actual.get("avg_hr")
+            drift = d.actual.get("hr_drift_pct")
+            parts_a = [f"{km:.1f} km"]
+            if pace:
+                m, s = divmod(int(pace), 60)
+                parts_a.append(f"{m}:{s:02d}/km")
+            if hr:
+                parts_a.append(f"HR {hr:.0f}")
+            if drift is not None:
+                parts_a.append(f"drift {drift:.1f}%")
+            if d.rpe:
+                parts_a.append(f"RPE {int(d.rpe)}")
+            actual_line = " · ".join(parts_a)
+
+        strengths_html = "".join(
+            f"<div style='color:#16A34A;font-size:12px;margin:2px 0'>✓ {s}</div>"
+            for s in d.strengths
+        )
+        weaknesses_html = "".join(
+            f"<div style='color:#B45309;font-size:12px;margin:2px 0'>▲ {w}</div>"
+            for w in d.weaknesses
+        )
+        advice_html = (
+            f"<div style='color:#1B2874;font-size:12px;margin:4px 0'>→ {d.advice}</div>"
+            if d.advice else ""
+        )
+        comment_html = (
+            f"<div style='color:#9CA3AF;font-size:11px;font-style:italic;margin:4px 0'>"
+            f"&ldquo;{d.comment}&rdquo;</div>"
+            if d.comment else ""
+        )
+
+        def _chip(label, col):
+            return (f"<span style='display:inline-block;padding:1px 7px;border-radius:99px;"
+                    f"font-size:10px;font-weight:700;color:#fff;background:{col};margin-right:4px'>"
+                    f"{label}</span>")
+
+        card = (
+            f"<div style='border-left:4px solid {color};padding:10px 14px;margin:6px 0;"
+            f"background:#FAFAFA;border-radius:0 8px 8px 0;font-family:-apple-system,sans-serif'>"
+            f"<div style='margin-bottom:6px'>"
+            f"<span style='font-size:11px;color:#9CA3AF'>{d.date}</span>&nbsp;"
+            + _chip(d.session_type, badge_color)
+            + _chip(d.rating, color)
+            + f"</div>"
+            f"<div style='font-size:12px;color:#374151;margin-bottom:4px'>{d.description}</div>"
+        )
+        if d.planned_km:
+            plan_str = f"Plan: {d.planned_km:.0f} km"
+            card += (
+                f"<div style='font-size:12px;color:#6B7280;margin-bottom:4px'>"
+                f"{plan_str}"
+                + (f" &nbsp;→&nbsp; Actual: {actual_line}" if actual_line else " &nbsp;→&nbsp; Not completed")
+                + "</div>"
+            )
+        card += strengths_html + weaknesses_html + advice_html + comment_html + "</div>"
+        parts.append(card)
+    return "".join(parts)
+
+
+def _render_compliance_card(comp: dict, prior_weeks: list = None) -> str:
+    """Render the plan-completion compliance card as HTML."""
+    pct = comp["pct_sessions"]
+    bar_color = "#16A34A" if pct >= 85 else ("#F59E0B" if pct >= 60 else "#DC2626")
+    bar_w = max(4, min(100, pct))
+
+    def _chip(label, color="#6B7280"):
+        return (f"<span style='display:inline-block;padding:2px 8px;border-radius:99px;"
+                f"font-size:11px;font-weight:600;color:#fff;background:{color};margin:2px'>"
+                f"{label}</span>")
+
+    chips = (
+        _chip(f"✓ {comp['successful']} done", "#16A34A")
+        + (_chip(f"~ {comp['moderate']} moderate", "#F59E0B") if comp["moderate"] else "")
+        + (_chip(f"↓ {comp['partial']} partial", "#F97316") if comp["partial"] else "")
+        + (_chip(f"✗ {comp['missed']} missed", "#DC2626") if comp["missed"] else "")
+        + (_chip(f"+ {comp['extra']} extra", "#7C3AED") if comp["extra"] else "")
+    )
+
+    km_line = (
+        f"{comp['actual_km']:.1f} / {comp['planned_km']:.1f} km "
+        f"({comp['pct_km']}%)"
+    )
+    key_line = (
+        f"Key sessions (quality + long): {comp['key_done']} / {comp['key_planned']}"
+        if comp["key_planned"] else ""
+    )
+
+    prior_html = ""
+    if prior_weeks:
+        n   = len(prior_weeks)
+        avg = round(sum(w.get("pct_sessions", 0) for w in prior_weeks) / n)
+        tot_planned = sum(w.get("planned_km", 0) for w in prior_weeks)
+        tot_actual  = sum(w.get("actual_km", 0) for w in prior_weeks)
+        prior_html = (
+            f"<div style='margin-top:8px;font-size:11px;color:#6B7280;border-top:1px solid #E5E7EB;"
+            f"padding-top:6px'>Across {n} debriefed week{'s' if n>1 else ''}: "
+            f"{avg}% of sessions · {tot_actual:.0f} of {tot_planned:.0f} km</div>"
+        )
+
+    return (
+        f"<div style='background:#F0F9FF;border:1px solid #BAE6FD;border-radius:10px;"
+        f"padding:14px 18px;font-family:-apple-system,sans-serif;margin:8px 0'>"
+        f"<div style='font-size:11px;font-weight:700;color:#1B2874;text-transform:uppercase;"
+        f"letter-spacing:.05em;margin-bottom:8px'>Plan completion"
+        f"<span style='font-weight:400;font-size:10px;color:#9CA3AF;margin-left:8px'>"
+        f"measured against the plan as it stands today</span></div>"
+        f"<div style='display:flex;align-items:center;gap:14px;margin-bottom:10px'>"
+        f"<div style='font-size:36px;font-weight:800;color:{bar_color}'>{pct}%</div>"
+        f"<div style='flex:1'>"
+        f"<div style='background:#E5E7EB;border-radius:99px;height:10px'>"
+        f"<div style='background:{bar_color};width:{bar_w}%;height:10px;border-radius:99px'></div>"
+        f"</div>"
+        f"<div style='font-size:11px;color:#6B7280;margin-top:4px'>{km_line}</div>"
+        f"</div></div>"
+        f"<div style='margin-bottom:6px'>{chips}</div>"
+        + (f"<div style='font-size:11px;color:#374151'>{key_line}</div>" if key_line else "")
+        + prior_html
+        + "</div>"
+    )
+
+
+def _week_iso_for(week_days: list) -> str:
+    if not week_days:
+        return ""
+    try:
+        d0 = date.fromisoformat(week_days[0]["date"])
+        return f"{d0.isocalendar()[0]}-W{d0.isocalendar()[1]:02d}"
+    except Exception:
+        return ""
+
+
+def _session_choices(week_days: list, hist: list) -> list:
+    """Build (label, date_str) choice list for the session dropdown."""
+    matched = debrief_mod.match_week(week_days, hist)
+    choices = []
+    for planned, actual in matched:
+        if planned and planned.get("session_type") == "Rest":
+            continue
+        if planned is None:
+            continue
+        d_str = planned.get("date", "")
+        wd    = planned.get("weekday", -1)
+        day   = _WEEKDAY_SHORT[wd] if 0 <= wd <= 6 else "—"
+        s_type = planned.get("session_type", "")
+        km     = planned.get("distance_km") or 0
+        km_str = f" · {km:.0f} km" if km else ""
+        try:
+            dt = date.fromisoformat(d_str)
+            label = f"{day} {dt.day} {dt.strftime('%b')} — {s_type}{km_str}"
+        except Exception:
+            label = f"{d_str} — {s_type}{km_str}"
+        choices.append((label, d_str))
+    return choices
+
+
+def _saved_sessions_map(cyc: dict, week_iso: str) -> dict:
+    return {
+        sd["date"]: sd
+        for sd in cyc.get("session_debriefs", {}).get(week_iso, {}).get("sessions", [])
+    }
+
+
 def load_checkin_panel():
-    """Return (current-week HTML, current injury level) for check-in panel init."""
+    """Return (week_html, injury, session_dd_update, cards_html, comp_html)."""
     s   = state_mod.load()
     cyc = active_cycle(s)
     injury = cyc.get("config", {}).get("injury_level", "none") if cyc else "none"
+    no_plan = "<p style='color:#9CA3AF;padding:16px;text-align:center'>No active plan — complete Setup &amp; Plan first.</p>"
+    empty_dd = gr.update(choices=[], value=None)
     if not cyc or not cyc.get("plan"):
-        empty = "<p style='color:#9CA3AF;padding:16px;text-align:center'>No active plan — complete Setup &amp; Plan first.</p>"
-        return empty, injury
+        return no_plan, injury, empty_dd, "", ""
+
     plan    = cyc["plan"]
     hr_max  = s.get("hr_max", 177)
     hr_rest = s.get("hr_rest", 50)
     idx     = _current_week_idx(plan)
-    return _plan_week_html(plan, idx, hr_max, hr_rest), injury
+    week_html = _plan_week_html(plan, idx, hr_max, hr_rest)
+
+    week = plan[idx] if idx < len(plan) else None
+    if not week:
+        return week_html, injury, empty_dd, "", ""
+
+    week_days = week.get("days", [])
+    hist      = s.get("history", [])
+    zones_d   = cyc.get("zones", {})
+    week_iso  = _week_iso_for(week_days)
+    saved     = _saved_sessions_map(cyc, week_iso)
+
+    choices   = _session_choices(week_days, hist)
+    dd_update = gr.update(
+        choices=[c[0] for c in choices],
+        value=choices[0][0] if choices else None,
+    )
+
+    # Show already-debriefed session cards
+    rpe_map     = {d: sd["rpe"]     for d, sd in saved.items() if sd.get("rpe")}
+    comment_map = {d: sd["comment"] for d, sd in saved.items() if sd.get("comment")}
+    debriefed   = [
+        debrief_mod.rate_session(p, a, zones_d,
+                                 rpe=rpe_map.get((p or a or {}).get("date", "")),
+                                 comment=comment_map.get((p or a or {}).get("date", ""), ""))
+        for p, a in debrief_mod.match_week(week_days, hist)
+        if (p or a or {}).get("date", "") in saved
+    ]
+    cards_html = _render_session_cards(debriefed) if debriefed else ""
+
+    prior = [v.get("compliance", {}) for k, v in cyc.get("session_debriefs", {}).items()
+             if k != week_iso and v.get("compliance")]
+    comp  = debrief_mod.compliance(debriefed) if debriefed else {"planned": 0, "successful": 0,
+            "moderate": 0, "partial": 0, "missed": 0, "extra": 0,
+            "planned_km": 0, "actual_km": 0, "pct_sessions": 0, "pct_km": 0,
+            "key_planned": 0, "key_done": 0}
+    comp_html = _render_compliance_card(comp, prior or None) if debriefed else ""
+
+    return week_html, injury, dd_update, cards_html, comp_html
+
+
+def session_info_handler(label: str):
+    """Return (rpe, comment, info_html) for the selected session label."""
+    s   = state_mod.load()
+    cyc = active_cycle(s)
+    if not cyc or not cyc.get("plan"):
+        return 5, "", ""
+
+    plan      = cyc.get("plan", [])
+    idx       = _current_week_idx(plan)
+    week      = plan[idx] if idx < len(plan) else None
+    if not week:
+        return 5, "", ""
+
+    week_days = week.get("days", [])
+    hist      = s.get("history", [])
+    zones_d   = cyc.get("zones", {})
+    week_iso  = _week_iso_for(week_days)
+    saved     = _saved_sessions_map(cyc, week_iso)
+
+    # Resolve label → date_str
+    choices = _session_choices(week_days, hist)
+    date_str = next((v for lbl, v in choices if lbl == label), None)
+    if not date_str:
+        return 5, "", ""
+
+    # Find matching pair
+    matched   = debrief_mod.match_week(week_days, hist)
+    pair      = next(((p, a) for p, a in matched
+                      if (p or {}).get("date") == date_str), (None, None))
+    planned, actual = pair
+
+    sv        = saved.get(date_str, {})
+    rpe_val   = sv.get("rpe") or 5
+    comment   = sv.get("comment", "")
+
+    # Build info card (plan + auto-matched actual)
+    if planned:
+        s_type  = planned.get("session_type", "")
+        plan_km = planned.get("distance_km") or 0
+        badge_c = _SESSION_COLOR.get(s_type, "#6B7280")
+        def _chip(lbl, col):
+            return (f"<span style='padding:2px 8px;border-radius:99px;font-size:11px;"
+                    f"font-weight:700;color:#fff;background:{col};margin-right:4px'>{lbl}</span>")
+        desc = planned.get("description", "")
+        actual_line = ""
+        if actual:
+            km   = actual.get("distance_km") or 0
+            pace = actual.get("avg_pace_s")
+            hr   = actual.get("avg_hr")
+            parts_a = [f"{km:.1f} km"]
+            if pace:
+                m, sc = divmod(int(pace), 60)
+                parts_a.append(f"{m}:{sc:02d}/km")
+            if hr:
+                parts_a.append(f"HR {hr:.0f}")
+            actual_line = (
+                f"<div style='font-size:12px;color:#374151;margin-top:4px'>"
+                f"<b>Actual:</b> {' · '.join(parts_a)}</div>"
+            )
+        targets = planned.get("targets", {})
+        def _tgt_chip(k, v):
+            tc = {"M-pace": "#1B2874", "T-pace": "#F5871F", "I-pace": "#DC2626"}.get(k, "#6B7280")
+            return (f"<span style='display:inline-block;padding:1px 6px;border-radius:99px;"
+                    f"font-size:10px;font-weight:700;color:#fff;background:{tc};margin:2px 2px 0 0'>"
+                    f"{k}: {v}</span>")
+        tgt_chips = "".join(_tgt_chip(k, v) for k, v in targets.items())
+        already = "✓ Already debriefed" if date_str in saved else ""
+        already_html = (f"<div style='font-size:11px;color:#16A34A;margin-top:4px'>{already}</div>"
+                        if already else "")
+        info_html = (
+            f"<div style='background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;"
+            f"padding:10px 14px;font-family:-apple-system,sans-serif;margin:8px 0'>"
+            + _chip(s_type, badge_c)
+            + f"<span style='font-size:12px;color:#374151;margin-left:4px'>"
+            f"Plan: {plan_km:.0f} km</span>"
+            f"<div style='font-size:12px;color:#6B7280;margin:6px 0'>{desc}</div>"
+            + (f"<div style='margin-bottom:4px'>{tgt_chips}</div>" if tgt_chips else "")
+            + (actual_line if actual else
+               "<div style='font-size:12px;color:#9CA3AF;margin-top:4px'>No matching activity found in history</div>")
+            + already_html
+            + "</div>"
+        )
+    else:
+        info_html = ""
+
+    return float(rpe_val), comment, info_html
+
+
+def debrief_session_handler(label: str, rpe, comment: str):
+    """Save debrief for one session; return (cards_html, comp_html)."""
+    s   = state_mod.load()
+    cyc = active_cycle(s)
+    if not cyc or not cyc.get("plan"):
+        return "", ""
+
+    plan      = cyc.get("plan", [])
+    idx       = _current_week_idx(plan)
+    week      = plan[idx] if idx < len(plan) else None
+    if not week:
+        return "", ""
+
+    week_days = week.get("days", [])
+    hist      = s.get("history", [])
+    zones_d   = cyc.get("zones", {})
+    week_iso  = _week_iso_for(week_days)
+
+    choices  = _session_choices(week_days, hist)
+    date_str = next((v for lbl, v in choices if lbl == label), None)
+    if not date_str:
+        return "", ""
+
+    rpe_val = None
+    try:
+        r = float(str(rpe).replace(",", "."))
+        if 1 <= r <= 10:
+            rpe_val = r
+    except (TypeError, ValueError):
+        pass
+
+    # Load saved sessions, update this one
+    existing = cyc.get("session_debriefs", {}).get(week_iso, {})
+    saved_list = existing.get("sessions", [])
+    saved_map  = {sd["date"]: sd for sd in saved_list}
+
+    # Rate the selected session
+    matched  = debrief_mod.match_week(week_days, hist)
+    pair     = next(((p, a) for p, a in matched if (p or {}).get("date") == date_str), (None, None))
+    new_d    = debrief_mod.rate_session(pair[0], pair[1], zones_d,
+                                         rpe=rpe_val, comment=(comment or "").strip())
+
+    from dataclasses import asdict
+    saved_map[date_str] = asdict(new_d)
+
+    # Rebuild full debriefs for compliance (only already-saved sessions)
+    all_debriefs = []
+    for p, a in matched:
+        ds = (p or a or {}).get("date", "")
+        if ds in saved_map:
+            sd = saved_map[ds]
+            all_debriefs.append(debrief_mod.rate_session(
+                p, a, zones_d,
+                rpe=sd.get("rpe"), comment=sd.get("comment", ""),
+            ))
+
+    comp = debrief_mod.compliance(all_debriefs)
+
+    cyc.setdefault("session_debriefs", {})[week_iso] = {
+        "week_iso":   week_iso,
+        "saved_at":   date.today().isoformat(),
+        "plan_week":  week_days,
+        "compliance": comp,
+        "sessions":   list(saved_map.values()),
+    }
+    s = set_active_cycle(s, cyc)
+    state_mod.save(s)
+
+    cards_html = _render_session_cards(all_debriefs)
+    prior = [v.get("compliance", {}) for k, v in cyc.get("session_debriefs", {}).items()
+             if k != week_iso and v.get("compliance")]
+    comp_html = _render_compliance_card(comp, prior or None)
+    return cards_html, comp_html
+
+
+def load_debrief_history() -> str:
+    """Render all saved session debriefs (newest first) as HTML for the history tab."""
+    s   = state_mod.load()
+    cyc = active_cycle(s)
+    if not cyc:
+        return "<p style='color:#9CA3AF;padding:16px'>No active cycle.</p>"
+    all_debriefs = cyc.get("session_debriefs", {})
+    if not all_debriefs:
+        return "<p style='color:#9CA3AF;padding:16px'>No debriefs saved yet — debrief sessions in the Weekly Check-in tab.</p>"
+
+    zones_d = cyc.get("zones", {})
+    html_parts = []
+    for week_iso in sorted(all_debriefs.keys(), reverse=True):
+        entry = all_debriefs[week_iso]
+        comp  = entry.get("compliance", {})
+        sessions = entry.get("sessions", [])
+        pct   = comp.get("pct_sessions", 0)
+        bar_c = "#16A34A" if pct >= 85 else ("#F59E0B" if pct >= 60 else "#DC2626")
+        header = (
+            f"<div style='background:#F0F4FF;border-left:4px solid #1B2874;border-radius:0 8px 8px 0;"
+            f"padding:8px 14px;margin:16px 0 6px;font-family:-apple-system,sans-serif'>"
+            f"<span style='font-weight:700;color:#1B2874'>{week_iso}</span>"
+            f"<span style='margin-left:12px;font-size:12px;color:{bar_c};font-weight:700'>{pct}% compliance</span>"
+            f"<span style='margin-left:12px;font-size:11px;color:#6B7280'>"
+            f"{comp.get('actual_km', 0):.0f}/{comp.get('planned_km', 0):.0f} km"
+            f"</span></div>"
+        )
+        cards = []
+        for sd in sessions:
+            d = debrief_mod.SessionDebrief(**{k: v for k, v in sd.items()
+                                              if k in debrief_mod.SessionDebrief.__dataclass_fields__})
+            if d.rating == debrief_mod.RATING_REST:
+                continue
+            color   = _RATING_COLOR.get(d.rating, "#6B7280")
+            badge_c = _SESSION_COLOR.get(d.session_type, "#6B7280")
+            def _bc(lbl, col):
+                return (f"<span style='padding:1px 7px;border-radius:99px;font-size:10px;"
+                        f"font-weight:700;color:#fff;background:{col};margin-right:4px'>{lbl}</span>")
+            cards.append(
+                f"<div style='border-left:3px solid {color};padding:6px 12px;margin:4px 0;"
+                f"background:#FAFAFA;border-radius:0 6px 6px 0;font-family:-apple-system,sans-serif'>"
+                f"<span style='font-size:11px;color:#9CA3AF'>{d.date}</span>&nbsp;"
+                + _bc(d.session_type, badge_c) + _bc(d.rating, color)
+                + (f"<span style='font-size:11px;color:#6B7280;margin-left:4px'>RPE {int(d.rpe)}</span>" if d.rpe else "")
+                + (f"<div style='font-size:11px;color:#9CA3AF;font-style:italic'>&ldquo;{d.comment}&rdquo;</div>" if d.comment else "")
+                + "</div>"
+            )
+        html_parts.append(header + "".join(cards))
+
+    return "".join(html_parts) if html_parts else "<p style='color:#9CA3AF;padding:16px'>No debriefs yet.</p>"
 
 
 def load_history_on_start():
@@ -1627,6 +2086,11 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                     _hist_reset_page, inputs=hist_df_state,
                     outputs=[hist_html, hist_page_state, hist_page_info])
 
+                gr.HTML('<div class="section-label" style="margin-top:24px">'
+                        '<div class="section-label-text">Session debrief history</div>'
+                        '<div class="section-label-sub">All debriefed sessions · newest week first</div></div>')
+                debrief_history_html = gr.HTML()
+
             # ── Panel 3: Adjustments ──────────────────────────────────────
             with gr.Group(visible=False, elem_id="panel-adj") as panel_adj:
                 gr.HTML("""<div class="page-header">
@@ -1675,6 +2139,33 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 gr.HTML('<div class="section-label"><div class="section-label-text">This week\'s plan</div></div>')
                 checkin_week_html = gr.HTML()
 
+                gr.HTML('<div class="section-label"><div class="section-label-text">Session debrief</div>'
+                        '<div class="section-label-sub">Select a session · add how it felt · save daily</div></div>')
+                debrief_session_dd = gr.Dropdown(choices=[], label="Select session", interactive=True)
+                debrief_session_info = gr.HTML()
+                with gr.Row():
+                    debrief_rpe = gr.Slider(minimum=1, maximum=10, step=0.5, value=5,
+                                            label="RPE (1–10)",
+                                            info="1 = very easy · 5 = moderate · 10 = max effort")
+                    debrief_comment = gr.Textbox(label="Comment (optional)", lines=2,
+                                                 placeholder="How did it feel? Any aches, adjustments…")
+                debrief_save_btn = gr.Button("Save debrief for this session", variant="secondary")
+                gr.HTML('<div class="section-label"><div class="section-label-text">Debriefed sessions</div>'
+                        '<div class="section-label-sub">Updates each time you save a session</div></div>')
+                debrief_cards = gr.HTML()
+                debrief_comp  = gr.HTML()
+
+                debrief_session_dd.change(
+                    session_info_handler,
+                    inputs=[debrief_session_dd],
+                    outputs=[debrief_rpe, debrief_comment, debrief_session_info],
+                )
+                debrief_save_btn.click(
+                    debrief_session_handler,
+                    inputs=[debrief_session_dd, debrief_rpe, debrief_comment],
+                    outputs=[debrief_cards, debrief_comp],
+                )
+
                 gr.HTML('<div class="section-label"><div class="section-label-text">How did the week go?</div></div>')
                 feeling_in = gr.Slider(minimum=1, maximum=5, step=0.5, value=3,
                                        label="Overall feeling",
@@ -1700,7 +2191,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 checkin_status  = gr.HTML()
                 checkin_metrics = gr.HTML()
                 gr.HTML('<div class="section-label"><div class="section-label-text">Coaching note</div></div>')
-                coaching_out    = gr.Textbox(label="", lines=8, interactive=False)
+                coaching_out    = gr.Markdown(label="")
                 gr.HTML('<div class="section-label"><div class="section-label-text">Next week proposal</div></div>')
                 checkin_plan_out = gr.HTML()
 
@@ -1738,8 +2229,12 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
     _btns   = [btn_plan, btn_setup, btn_hist, btn_adj, btn_checkin, btn_zones]
     for _i, _btn in enumerate(_btns):
         ev = _btn.click(_nav_handler(_i), outputs=_panels + _btns)
-        if _i == 4:  # check-in tab: load current week + injury level on open
-            ev.then(load_checkin_panel, outputs=[checkin_week_html, checkin_injury_in])
+        if _i == 2:  # activity log tab: load debrief history
+            ev.then(load_debrief_history, outputs=[debrief_history_html])
+        if _i == 4:  # check-in tab: load week plan, injury, session dropdown, cards
+            ev.then(load_checkin_panel,
+                    outputs=[checkin_week_html, checkin_injury_in,
+                             debrief_session_dd, debrief_cards, debrief_comp])
 
     # ── Plan week navigation ────────────────────────────────────────────────
     _PLAN_LOOKAHEAD = 2   # weeks beyond plan end that show a projected stub
