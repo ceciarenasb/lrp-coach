@@ -1187,6 +1187,10 @@ input.svelte-1scun43, input.svelte-1sk0pyu { color: #111827 !important; }
     background: #ffffff !important; border: 1px solid #D1D5DB !important;
     border-radius: 6px !important; color: #111827 !important;
 }
+/* Read-only / disabled textareas (e.g. coaching note output) */
+.gradio-container textarea:disabled, .gradio-container textarea[readonly] {
+    color: #111827 !important; opacity: 1 !important; -webkit-text-fill-color: #111827 !important;
+}
 /* Radio group */
 .gradio-container input[type="radio"] { accent-color: var(--lrp-navy) !important; }
 #app-layout {
@@ -1649,7 +1653,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 adj_msg_in      = gr.Textbox(label="Message to coach (optional)", lines=2,
                                              placeholder="e.g. I have a race next weekend / travelling / physio said rest")
                 adj_btn         = gr.Button("Apply & get coaching note", variant="primary")
-                adj_note_out    = gr.Textbox(label="Coaching note", lines=8, interactive=False)
+                adj_note_out    = gr.Markdown(label="Coaching note")
                 adj_status_out  = gr.HTML()
 
                 adj_btn.click(
