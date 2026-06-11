@@ -10,6 +10,7 @@ import gradio as gr
 import pandas as pd
 
 from coach import debrief as debrief_mod
+from coach import editplan as editplan_mod
 from coach import fit as fit_mod
 from coach import garmin as garmin_mod
 from coach import llm as llm_mod
@@ -464,6 +465,169 @@ def _current_week_idx(plan: list) -> int:
         if start > today:
             return i
     return max(0, len(plan) - 1)
+
+
+def _calendar_week_html(plan: list, week_idx: int) -> str:
+    _EMPTY = (
+        "<div style='text-align:center;padding:56px;color:#9CA3AF;"
+        "font-family:-apple-system,sans-serif'>"
+        "<div style='font-size:44px'>🏃</div>"
+        "<div style='font-size:15px;font-weight:600;color:#374151;margin-top:8px'>No plan yet</div>"
+        "<div style='font-size:13px;margin-top:4px'>Go to Setup &amp; Plan to generate your training plan.</div>"
+        "</div>"
+    )
+    if not plan:
+        return _EMPTY
+    week_idx = max(0, min(week_idx, len(plan) - 1))
+    w      = plan[week_idx]
+    phase  = w.get("phase", "")
+    accent = _PHASE_COLORS.get(phase, "#64748B")
+    wk_num = w.get("week_num", week_idx + 1)
+    total_km = w.get("target_km", 0)
+    today  = date.today()
+
+    cols = ""
+    for day in w["days"]:
+        d    = date.fromisoformat(day["date"])
+        sess = day["session_type"]
+        desc = day.get("description", "")
+        km   = day.get("distance_km", 0)
+        col_color = _SESSION_COLOR.get(sess, "#9CA3AF")
+        is_today  = d == today
+        border    = f"2px solid #F59E0B" if is_today else f"1px solid #E5E7EB"
+        day_hdr   = (
+            f"<div style='text-align:center;font-size:10px;font-weight:700;"
+            f"text-transform:uppercase;letter-spacing:.05em;"
+            f"color:{'#1B2874' if is_today else '#6B7280'};margin-bottom:6px'>"
+            f"{d.strftime('%a')}<br><span style='font-size:12px'>{d.day}</span></div>"
+        )
+        if sess in ("Rest",):
+            card = "<div style='text-align:center;color:#D1D5DB;font-size:11px;padding:6px'>Rest</div>"
+        else:
+            km_txt  = f"{km:.0f} km" if km else ""
+            desc_sh = (desc[:38] + "…") if len(desc) > 38 else desc
+            # chips inside card
+            targets = day.get("targets", {})
+            chip_html = ""
+            if targets:
+                _PACE_COLOR = {
+                    "M-pace": "#1B2874", "T-pace": "#F5871F", "I-pace": "#DC2626",
+                    "Easy section": "#16A34A", "Finish at": "#1B2874",
+                    "WU/CD": "#6B7280", "recovery": "#6B7280",
+                    "pace": "#10B981",
+                }
+                for k, v in targets.items():
+                    tc = _PACE_COLOR.get(k, "#6B7280")
+                    chip_html += (
+                        f"<span style='display:inline-block;margin:2px 2px 0 0;"
+                        f"padding:1px 5px;border-radius:99px;font-size:9px;"
+                        f"font-weight:700;color:#fff;background:{tc}'>{k}: {v}</span>"
+                    )
+            card = (
+                f"<div draggable='true' data-cal-date='{day['date']}' "
+                f"style='background:{col_color};color:#fff;border-radius:6px;"
+                f"padding:6px 8px;cursor:grab;user-select:none;font-family:-apple-system,sans-serif'>"
+                f"<div style='font-size:11px;font-weight:700'>{sess}</div>"
+                f"<div style='font-size:10px;opacity:.85;margin-top:2px;line-height:1.3'>{desc_sh}</div>"
+                + (f"<div style='font-size:9px;opacity:.75;margin-top:4px'>{km_txt}</div>" if km_txt else "")
+                + (f"<div style='margin-top:4px'>{chip_html}</div>" if chip_html else "")
+                + "</div>"
+            )
+        cols += (
+            f"<div data-cal-drop='{day['date']}' "
+            f"style='min-height:140px;border-radius:8px;border:{border};"
+            f"padding:8px;background:#fff;box-sizing:border-box'>"
+            f"{day_hdr}{card}</div>"
+        )
+
+    header = (
+        f"<div style='background:{accent};border-radius:10px 10px 0 0;"
+        f"padding:10px 16px;color:#fff;font-family:-apple-system,sans-serif'>"
+        f"<span style='font-size:14px;font-weight:700;text-transform:uppercase;"
+        f"letter-spacing:.06em'>{phase} · Week {wk_num}</span>"
+        f"<span style='float:right;font-size:11px;opacity:.75'>"
+        f"Target {total_km:.0f} km &nbsp;·&nbsp; {week_idx+1} / {len(plan)}</span>"
+        f"</div>"
+    )
+    return (
+        header
+        + f"<div style='display:grid;grid-template-columns:repeat(7,1fr);gap:8px;"
+          f"padding:16px;background:#F9FAFB;border-radius:0 0 10px 10px'>{cols}</div>"
+    )
+
+
+def _calendar_month_html(plan: list) -> str:
+    _EMPTY = (
+        "<div style='text-align:center;padding:56px;color:#9CA3AF;"
+        "font-family:-apple-system,sans-serif'>"
+        "<div style='font-size:15px;font-weight:600;color:#374151'>No plan yet</div>"
+        "</div>"
+    )
+    if not plan:
+        return _EMPTY
+    today = date.today()
+    hdr_cells = "".join(
+        f"<th style='padding:4px 6px;font-size:10px;font-weight:600;"
+        f"color:#6B7280;text-align:left'>{d}</th>"
+        for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    )
+    rows = ""
+    for wi, w in enumerate(plan):
+        phase  = w.get("phase", "")
+        accent = _PHASE_COLORS.get(phase, "#64748B")
+        wk_num = w.get("week_num", wi + 1)
+        day_map = {day["weekday"]: day for day in w["days"]}
+        cells = ""
+        for wd in range(7):
+            day = day_map.get(wd)
+            if day is None:
+                cells += "<td style='padding:3px'></td>"
+                continue
+            d    = date.fromisoformat(day["date"])
+            sess = day["session_type"]
+            col  = _SESSION_COLOR.get(sess, "#9CA3AF")
+            is_today = d == today
+            bg     = "#FFFBEB" if is_today else "#fff"
+            border = "2px solid #F59E0B" if is_today else "1px solid #E5E7EB"
+            if sess == "Rest":
+                badge = "<span style='color:#D1D5DB;font-size:9px'>—</span>"
+            else:
+                badge = (
+                    f"<span style='background:{col};color:#fff;border-radius:99px;"
+                    f"font-size:9px;font-weight:700;padding:1px 5px'>{sess[:4]}</span>"
+                )
+            cells += (
+                f"<td style='padding:3px;vertical-align:top'>"
+                f"<div style='background:{bg};border:{border};border-radius:4px;padding:3px 4px'>"
+                f"<div style='font-size:9px;color:#9CA3AF'>{d.day} {d.strftime('%b')}</div>"
+                f"{badge}</div></td>"
+            )
+        phase_cell = (
+            f"<td style='padding:3px;vertical-align:middle'>"
+            f"<div style='background:{accent}22;border-radius:4px;padding:3px 6px'>"
+            f"<div style='font-size:9px;font-weight:700;color:{accent}'>{phase}</div>"
+            f"<div style='font-size:9px;color:#6B7280'>W{wk_num}</div></div></td>"
+        )
+        rows += f"<tr>{phase_cell}{cells}</tr>"
+
+    return (
+        "<div style='overflow-x:auto;border-radius:10px;border:1px solid #E5E7EB;"
+        "font-family:-apple-system,sans-serif'>"
+        "<table style='width:100%;border-collapse:separate;border-spacing:2px;"
+        "font-size:11px;padding:8px'>"
+        f"<thead><tr><th></th>{hdr_cells}</tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+    )
+
+
+def _render_plan(week_idx: int, view: str) -> str:
+    s = state_mod.load()
+    plan = s.get("plan", [])
+    if view == "Week":
+        return _calendar_week_html(plan, int(week_idx or 0))
+    if view == "Month":
+        return _calendar_month_html(plan)
+    return _plan_week_html(plan, int(week_idx or 0), s.get("hr_max", 177), s.get("hr_rest", 50))
 
 
 # ── Data loaders ───────────────────────────────────────────────────────────
@@ -1828,11 +1992,52 @@ _startup = state_mod.load()
 if _startup.get("garmin_auto_sync", False) and garmin_mod.is_authenticated():
     sched_mod.start(_daily_sync_job)
 
+# ── Calendar drag-drop JS ──────────────────────────────────────────────────
+
+_CAL_JS = """
+(function() {
+    'use strict';
+    var _from = null;
+    function _bridge() { return document.querySelector('#cal-move-bridge textarea'); }
+    function _trigger(from, to) {
+        var el = _bridge();
+        if (!el) return;
+        var setter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(el, from + '|' + to);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    document.addEventListener('dragstart', function(e) {
+        var card = e.target.closest('[data-cal-date]');
+        if (card) { _from = card.getAttribute('data-cal-date'); e.dataTransfer.effectAllowed = 'move'; }
+    }, true);
+    document.addEventListener('dragover', function(e) {
+        var cell = e.target.closest('[data-cal-drop]');
+        if (cell && _from) { e.preventDefault(); cell.style.outline = '2px dashed #F5871F'; }
+    }, true);
+    document.addEventListener('dragleave', function(e) {
+        var cell = e.target.closest('[data-cal-drop]');
+        if (cell) { cell.style.outline = ''; }
+    }, true);
+    document.addEventListener('drop', function(e) {
+        var cell = e.target.closest('[data-cal-drop]');
+        if (!cell) return;
+        e.preventDefault();
+        cell.style.outline = '';
+        var to = cell.getAttribute('data-cal-drop');
+        if (_from && to && _from !== to) { _trigger(_from, to); }
+        _from = null;
+    }, true);
+    document.addEventListener('dragend', function() { _from = null; }, true);
+})();
+"""
+
 # ── App ────────────────────────────────────────────────────────────────────
 
 _garmin_outputs = None
 
-with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
+with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
+               head=f"<script>{_CAL_JS}</script>") as demo:
 
     with gr.Row(elem_id="app-layout", equal_height=True):
 
@@ -1864,14 +2069,24 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                     <span class="page-header-icon">📋</span>
                     <div>
                         <div class="page-header-title">My Plan</div>
-                        <div class="page-header-sub">One week at a time · ← → navigate · updates after check-in</div>
+                        <div class="page-header-sub">One week at a time · ← → navigate · drag sessions to reschedule</div>
                     </div></div>""")
                 plan_week_state = gr.State(value=0)
+                cal_undo_stack  = gr.State(value=[])
                 with gr.Row():
-                    plan_prev_btn = gr.Button("← Prev week", size="sm", scale=1)
-                    plan_this_btn = gr.Button("This week",   size="sm", scale=1)
-                    plan_next_btn = gr.Button("Next week →", size="sm", scale=1)
-                plan_html = gr.HTML()
+                    plan_prev_btn  = gr.Button("← Prev week", size="sm", scale=1)
+                    plan_this_btn  = gr.Button("This week",   size="sm", scale=1)
+                    plan_next_btn  = gr.Button("Next week →", size="sm", scale=1)
+                    cal_view_radio = gr.Radio(
+                        choices=["List", "Week", "Month"], value="List",
+                        label=None, scale=2, interactive=True
+                    )
+                    cal_undo_btn = gr.Button("↩ Undo", size="sm", scale=1, visible=False)
+                plan_html    = gr.HTML()
+                cal_warnings = gr.HTML()
+                cal_move_bridge = gr.Textbox(
+                    value="", visible=False, elem_id="cal-move-bridge"
+                )
 
             # ── Panel 1: Setup & Plan ─────────────────────────────────────
             with gr.Group(visible=False, elem_id="panel-setup") as panel_setup:
@@ -2239,7 +2454,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
     # ── Plan week navigation ────────────────────────────────────────────────
     _PLAN_LOOKAHEAD = 2   # weeks beyond plan end that show a projected stub
 
-    def _plan_prev(idx):
+    def _plan_prev(idx, view):
         idx = int(idx or 0)
         if idx <= 0:
             return (
@@ -2250,16 +2465,15 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 0,
             )
         new_idx = idx - 1
-        return render_plan_week(new_idx), new_idx
+        return _render_plan(new_idx, view), new_idx
 
-    def _plan_next(idx):
+    def _plan_next(idx, view):
         s    = state_mod.load()
         plan = s.get("plan", [])
         idx  = int(idx or 0)
         max_idx = len(plan) - 1 + _PLAN_LOOKAHEAD
         new_idx = min(max_idx, idx + 1)
         if new_idx >= len(plan):
-            # Show projected stub
             weeks_ahead = new_idx - len(plan) + 1
             return (
                 "<div style='background:#FFFBEB;border:1px solid #FCD34D;border-radius:10px;"
@@ -2272,17 +2486,73 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
                 "</div>",
                 new_idx,
             )
-        return render_plan_week(new_idx), new_idx
+        return _render_plan(new_idx, view), new_idx
 
-    def _plan_this():
+    def _plan_this(view):
         s    = state_mod.load()
         plan = s.get("plan", [])
         idx  = _current_week_idx(plan)
-        return render_plan_week(idx), idx
+        return _render_plan(idx, view), idx
 
-    plan_prev_btn.click(_plan_prev, inputs=plan_week_state, outputs=[plan_html, plan_week_state])
-    plan_next_btn.click(_plan_next, inputs=plan_week_state, outputs=[plan_html, plan_week_state])
-    plan_this_btn.click(_plan_this, outputs=[plan_html, plan_week_state])
+    plan_prev_btn.click(_plan_prev, inputs=[plan_week_state, cal_view_radio], outputs=[plan_html, plan_week_state])
+    plan_next_btn.click(_plan_next, inputs=[plan_week_state, cal_view_radio], outputs=[plan_html, plan_week_state])
+    plan_this_btn.click(_plan_this, inputs=[cal_view_radio], outputs=[plan_html, plan_week_state])
+
+    # ── View toggle ─────────────────────────────────────────────────────────
+    cal_view_radio.change(
+        lambda view, idx: _render_plan(int(idx or 0), view),
+        inputs=[cal_view_radio, plan_week_state],
+        outputs=[plan_html],
+    )
+
+    # ── Drag-drop move handler ───────────────────────────────────────────────
+    def _move_handler(bridge_val: str, week_idx: int, view: str, undo_stack: list):
+        if not bridge_val or "|" not in bridge_val:
+            return gr.update(), undo_stack, "", gr.update()
+        from_date, to_date = bridge_val.split("|", 1)
+        s        = state_mod.load()
+        old_plan = s.get("plan", [])
+        new_stack = (list(undo_stack) + [{"plan": old_plan}])[-10:]
+        new_plan, warnings = editplan_mod.move_session(old_plan, from_date, to_date)
+        s["plan"] = new_plan
+        state_mod.save(s)
+        warn_html = ""
+        if warnings:
+            items = "".join(f"<li>{w}</li>" for w in warnings)
+            warn_html = (
+                f"<div style='background:#FFFBEB;border:1px solid #FCD34D;"
+                f"border-radius:8px;padding:10px 14px;font-size:12px;color:#92400E;"
+                f"margin-top:8px'><b>Schedule note:</b>"
+                f"<ul style='margin:4px 0 0 16px;padding:0'>{items}</ul></div>"
+            )
+        html = _render_plan(int(week_idx or 0), view)
+        undo_visible = gr.update(visible=bool(new_stack))
+        return html, new_stack, warn_html, undo_visible
+
+    cal_move_bridge.change(
+        _move_handler,
+        inputs=[cal_move_bridge, plan_week_state, cal_view_radio, cal_undo_stack],
+        outputs=[plan_html, cal_undo_stack, cal_warnings, cal_undo_btn],
+    )
+
+    # ── Undo handler ────────────────────────────────────────────────────────
+    def _undo_handler(undo_stack: list, week_idx: int, view: str):
+        if not undo_stack:
+            return gr.update(), undo_stack, "", gr.update()
+        new_stack = list(undo_stack)
+        prev = new_stack.pop()
+        s = state_mod.load()
+        s["plan"] = prev["plan"]
+        state_mod.save(s)
+        html = _render_plan(int(week_idx or 0), view)
+        undo_visible = gr.update(visible=bool(new_stack))
+        return html, new_stack, "", undo_visible
+
+    cal_undo_btn.click(
+        _undo_handler,
+        inputs=[cal_undo_stack, plan_week_state, cal_view_radio],
+        outputs=[plan_html, cal_undo_stack, cal_warnings, cal_undo_btn],
+    )
 
     # ── LRP session add/remove wiring ──────────────────────────────────────
     add_lrp2_btn.click(
@@ -2316,7 +2586,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme) as demo:
         s = state_mod.load()
         plan = s.get("plan", [])
         idx  = _current_week_idx(plan)
-        html = _plan_week_html(plan, idx, s.get("hr_max", 177), s.get("hr_rest", 50))
+        html = _render_plan(idx, "List")
         ok = bool(plan)
         status_html = (
             f"<div style='background:#DCFCE7;border:1px solid #16A34A;border-radius:8px;"
