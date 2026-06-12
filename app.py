@@ -1951,6 +1951,13 @@ input.svelte-1scun43, input.svelte-1sk0pyu { color: #111827 !important; }
     border-top: 1px solid #E5E7EB;
     letter-spacing: 0.04em;
 }
+/* Drag-drop bridge — must be in DOM (Svelte binding needs it) but invisible */
+#cal-move-bridge {
+    position: absolute !important;
+    width: 1px !important; height: 1px !important;
+    overflow: hidden !important; clip: rect(0,0,0,0) !important;
+    opacity: 0 !important; pointer-events: none !important;
+}
 """
 
 # ── Theme ──────────────────────────────────────────────────────────────────
@@ -1998,27 +2005,24 @@ _CAL_JS = """
 (function() {
     'use strict';
     var _from = null;
-    function _bridge() { return document.querySelector('#cal-move-bridge textarea'); }
     function _trigger(from, to) {
-        var el = _bridge();
+        var el = document.querySelector('#cal-move-bridge textarea');
         if (!el) return;
-        var setter = Object.getOwnPropertyDescriptor(
-            window.HTMLTextAreaElement.prototype, 'value').set;
-        setter.call(el, from + '|' + to);
+        el.value = from + '|' + to + '|' + Date.now();
         el.dispatchEvent(new Event('input', { bubbles: true }));
     }
     document.addEventListener('dragstart', function(e) {
         var card = e.target.closest('[data-cal-date]');
         if (card) { _from = card.getAttribute('data-cal-date'); e.dataTransfer.effectAllowed = 'move'; }
-    }, true);
+    });
     document.addEventListener('dragover', function(e) {
         var cell = e.target.closest('[data-cal-drop]');
         if (cell && _from) { e.preventDefault(); cell.style.outline = '2px dashed #F5871F'; }
-    }, true);
+    });
     document.addEventListener('dragleave', function(e) {
         var cell = e.target.closest('[data-cal-drop]');
-        if (cell) { cell.style.outline = ''; }
-    }, true);
+        if (cell && !cell.contains(e.relatedTarget)) { cell.style.outline = ''; }
+    });
     document.addEventListener('drop', function(e) {
         var cell = e.target.closest('[data-cal-drop]');
         if (!cell) return;
@@ -2027,8 +2031,8 @@ _CAL_JS = """
         var to = cell.getAttribute('data-cal-drop');
         if (_from && to && _from !== to) { _trigger(_from, to); }
         _from = null;
-    }, true);
-    document.addEventListener('dragend', function() { _from = null; }, true);
+    });
+    document.addEventListener('dragend', function() { _from = null; });
 })();
 """
 
@@ -2085,7 +2089,8 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
                 plan_html    = gr.HTML()
                 cal_warnings = gr.HTML()
                 cal_move_bridge = gr.Textbox(
-                    value="", visible=False, elem_id="cal-move-bridge"
+                    value="", label=None, show_label=False,
+                    elem_id="cal-move-bridge"
                 )
 
             # ── Panel 1: Setup & Plan ─────────────────────────────────────
@@ -2509,7 +2514,10 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
     def _move_handler(bridge_val: str, week_idx: int, view: str, undo_stack: list):
         if not bridge_val or "|" not in bridge_val:
             return gr.update(), undo_stack, "", gr.update()
-        from_date, to_date = bridge_val.split("|", 1)
+        parts = bridge_val.split("|")
+        if len(parts) < 2:
+            return gr.update(), undo_stack, "", gr.update()
+        from_date, to_date = parts[0], parts[1]   # parts[2] is the timestamp noise
         s        = state_mod.load()
         old_plan = s.get("plan", [])
         new_stack = (list(undo_stack) + [{"plan": old_plan}])[-10:]
@@ -2529,7 +2537,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
         undo_visible = gr.update(visible=bool(new_stack))
         return html, new_stack, warn_html, undo_visible
 
-    cal_move_bridge.change(
+    cal_move_bridge.input(
         _move_handler,
         inputs=[cal_move_bridge, plan_week_state, cal_view_radio, cal_undo_stack],
         outputs=[plan_html, cal_undo_stack, cal_warnings, cal_undo_btn],
