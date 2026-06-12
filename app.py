@@ -1951,12 +1951,12 @@ input.svelte-1scun43, input.svelte-1sk0pyu { color: #111827 !important; }
     border-top: 1px solid #E5E7EB;
     letter-spacing: 0.04em;
 }
-/* Drag-drop bridge — must be in DOM (Svelte binding needs it) but invisible */
-#cal-move-bridge {
+/* Drag-drop bridge components — must be in DOM but visually hidden */
+#cal-move-bridge, #cal-trigger-btn {
     position: absolute !important;
     width: 1px !important; height: 1px !important;
     overflow: hidden !important; clip: rect(0,0,0,0) !important;
-    opacity: 0 !important; pointer-events: none !important;
+    opacity: 0 !important;
 }
 """
 
@@ -2006,10 +2006,10 @@ _CAL_JS = """
     'use strict';
     var _from = null;
     function _trigger(from, to) {
-        var el = document.querySelector('#cal-move-bridge textarea');
-        if (!el) return;
-        el.value = from + '|' + to + '|' + Date.now();
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+        var bridge = document.querySelector('#cal-move-bridge textarea, #cal-move-bridge input[type=text]');
+        if (!bridge) return;
+        bridge.value = from + '|' + to + '|' + Date.now();
+        bridge.dispatchEvent(new Event('input', { bubbles: true }));
     }
     document.addEventListener('dragstart', function(e) {
         var card = e.target.closest('[data-cal-date]');
@@ -2090,7 +2090,7 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
                 cal_warnings = gr.HTML()
                 cal_move_bridge = gr.Textbox(
                     value="", label=None, show_label=False,
-                    elem_id="cal-move-bridge"
+                    interactive=True, elem_id="cal-move-bridge"
                 )
 
             # ── Panel 1: Setup & Plan ─────────────────────────────────────
@@ -2518,11 +2518,15 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
         if len(parts) < 2:
             return gr.update(), undo_stack, "", gr.update()
         from_date, to_date = parts[0], parts[1]   # parts[2] is the timestamp noise
-        s        = state_mod.load()
-        old_plan = s.get("plan", [])
+        s   = state_mod.load()
+        cyc = state_mod.active_cycle(s)
+        if not cyc:
+            return gr.update(), undo_stack, "", gr.update()
+        old_plan  = cyc.get("plan", [])
         new_stack = (list(undo_stack) + [{"plan": old_plan}])[-10:]
         new_plan, warnings = editplan_mod.move_session(old_plan, from_date, to_date)
-        s["plan"] = new_plan
+        cyc["plan"] = new_plan
+        s = state_mod.set_active_cycle(s, cyc)
         state_mod.save(s)
         warn_html = ""
         if warnings:
@@ -2549,8 +2553,12 @@ with gr.Blocks(title="LRP Coach", css=CSS, theme=_theme,
             return gr.update(), undo_stack, "", gr.update()
         new_stack = list(undo_stack)
         prev = new_stack.pop()
-        s = state_mod.load()
-        s["plan"] = prev["plan"]
+        s   = state_mod.load()
+        cyc = state_mod.active_cycle(s)
+        if not cyc:
+            return gr.update(), undo_stack, "", gr.update()
+        cyc["plan"] = prev["plan"]
+        s = state_mod.set_active_cycle(s, cyc)
         state_mod.save(s)
         html = _render_plan(int(week_idx or 0), view)
         undo_visible = gr.update(visible=bool(new_stack))
