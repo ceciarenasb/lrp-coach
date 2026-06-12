@@ -8,6 +8,7 @@ Cross-training combines with run days (noted in description) rather than blockin
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
@@ -73,9 +74,9 @@ def _peak_km(goal_s: int) -> float:
 
 
 def _long_run_km(wk: int, total: int) -> float:
-    taper_start = total - 3
+    taper_start = total - 1  # 2-week taper: one taper week + race week
     if wk >= taper_start:
-        return max(16.0, 32.0 - (wk - taper_start) * 6.0)
+        return (26.0, 16.0)[min(wk - taper_start, 1)]
     prog = (wk - 1) / max(1, taper_start - 1)
     return round(18.0 + prog * 14.0, 1)
 
@@ -487,7 +488,7 @@ def generate_plan(
         zones = _dc_replace(zones, marathon=goal_mp_s)
 
     tomorrow = date.today() + timedelta(days=1)
-    weeks = max(4, min(20, (marathon_date - tomorrow).days // 7))
+    weeks = max(4, min(20, math.ceil((marathon_date - tomorrow).days / 7)))
     peak = _peak_km(goal_time_s)
     base = start_km if start_km else peak * 0.55
 
@@ -514,7 +515,7 @@ def generate_plan(
     # Calendar-align weeks to Mon-Sun: week 1 starts from the Monday
     # of the week containing tomorrow (may be a partial week).
     week1_mon = tomorrow - timedelta(days=tomorrow.weekday())
-    taper_start = weeks - 3
+    taper_start = weeks - 1  # last 2 weeks: taper week + race week
     plan = []
 
     prev_phase = None
@@ -522,14 +523,14 @@ def generate_plan(
 
     for wk in range(1, weeks + 1):
         pct = wk / weeks
-        if pct < 0.35:
+        if wk > weeks - 2:
+            phase = "Taper"
+        elif pct < 0.35:
             phase = "Base"
         elif pct < 0.70:
             phase = "Build"
-        elif pct < 0.85:
-            phase = "Peak"
         else:
-            phase = "Taper"
+            phase = "Peak"
 
         if phase != prev_phase:
             prev_phase = phase
@@ -537,7 +538,7 @@ def generate_plan(
         phase_wk = phase_wk_counters[phase]
 
         if wk >= taper_start:
-            target_km = max(peak * 0.40, peak * (1 - (wk - taper_start) * 0.22))
+            target_km = peak * (0.70, 0.35)[min(wk - taper_start, 1)]
         elif not allow_volume_increase:
             target_km = base
         else:
@@ -588,14 +589,16 @@ def generate_plan(
 
 
 def _focus(phase: str, wk: int, total: int) -> str:
-    taper_wk = wk - (total - 3)
+    taper_wk = wk - (total - 2)
     if phase == "Base":
         return "Build aerobic base — short intervals and tempo layered onto easy volume"
     if phase == "Build":
         return "Race fitness — SVC intervals, VO₂max work, medium-long runs with M-pace finish"
     if phase == "Peak":
         return "Peak load — race-specific workouts, long runs with M-pace blocks, absorb the fatigue"
-    return f"Taper week {taper_wk}/3 — cut volume, keep sharpeners, arrive fresh and confident"
+    if taper_wk >= 2:
+        return "Race week — final sharpener, easy jogs, trust your training"
+    return f"Taper week {taper_wk}/2 — cut volume, keep sharpeners, arrive fresh and confident"
 
 
 # Public alias — decide.py uses this to build a single week without calling generate_plan
